@@ -518,7 +518,7 @@ class Player:
         vol = int(self.cfg.get("volume", 0))
         fit = self.cfg.get("fit", "cover")
         base = [mpv, "--no-config", "--force-window=immediate", "--no-border", "--no-osc", "--osd-level=0",
-                "--no-input-default-bindings", "--loop-file=inf", "--keep-open=yes",
+                "--no-input-default-bindings", "--window-dragging=no", "--input-cursor=no", "--loop-file=inf", "--keep-open=yes",
                 "--image-display-duration=inf", "--stop-screensaver=no", "--hwdec=auto-safe",
                 "--audio-display=no", f"--volume={vol}", f"--mute={'yes' if vol == 0 else 'no'}",
                 "--ytdl=yes", f"--ytdl-format=bv*[height<=?{q}]+ba/b[height<=?{q}]/b",
