@@ -805,7 +805,7 @@ class App(ctk.CTk):
         if self._assign_items():
             threading.Thread(target=self._startup_worker, daemon=True).start()
         cleanup_old_updates()
-        self.after(8000, self._auto_check)
+        self.after(20000, self._auto_check)
 
     def _startup_worker(self):
         self.player.apply(self._assign_items())
@@ -1411,11 +1411,62 @@ class App(ctk.CTk):
         self.upd_btn.configure(text="Jetzt installieren", command=self.install_update)
         self.upd_frame.pack(fill="x", padx=6, pady=(0, 8))
         self.set_status(f"Update v{info['version']} heruntergeladen.")
+        self._show_update_toast(info)
+
+    def _show_update_toast(self, info):
+        """Kleiner Hinweis unten rechts (auch bei verstecktem Hauptfenster): Update ist geladen, Nutzer bestätigt."""
+        ver = info["version"]
+        if getattr(self, "_toast_ver", None) == ver:
+            return  # pro Version nur einmal pro Sitzung
         try:
-            if self.state() == "withdrawn":
-                self.tray.notify(f"Update v{info['version']} ist bereit – im Wallura-Fenster installieren.", "Wallura")
+            if fullscreen_app_active():  # nicht in Spiele / Vollbild-Apps hineinplatzen
+                self.after(60000, lambda: self._show_update_toast(info))
+                return
         except Exception:
             pass
+        self._toast_ver = ver
+        import tkinter
+        t = ctk.CTkToplevel(self)
+        t.withdraw()
+        t.overrideredirect(True)
+        t.attributes("-topmost", True)
+        t.configure(fg_color=SURFACE)
+        box = ctk.CTkFrame(t, width=380, height=156, corner_radius=0, fg_color=SURFACE,
+                           border_width=1, border_color=ACCENT_DIM)
+        box.pack_propagate(False)
+        box.pack()
+        ctk.CTkLabel(box, text=f"Wallura {ver} ist bereit", font=self._font(16, "bold"), text_color=TEXT,
+                     anchor="w").pack(fill="x", padx=18, pady=(16, 2))
+        ctk.CTkLabel(box, text="Das Update ist heruntergeladen. Nach der Installation startet Wallura "
+                               "von selbst neu.", font=self._font(12), text_color=MUTED, anchor="w",
+                     justify="left", wraplength=340).pack(fill="x", padx=18)
+        btns = ctk.CTkFrame(box, fg_color="transparent")
+        btns.pack(side="bottom", fill="x", padx=18, pady=(0, 16))
+
+        def close():
+            try:
+                t.destroy()
+            except Exception:
+                pass
+
+        def install():
+            close()
+            self.install_update()
+
+        self._btn(btns, "Jetzt installieren", install, "primary", height=34, width=150).pack(side="left")
+        self._btn(btns, "Später", close, "ghost", height=34, width=80).pack(side="left", padx=(8, 0))
+
+        t.update_idletasks()
+        w, h = t.winfo_reqwidth(), t.winfo_reqheight()
+        try:
+            mon = win32api.MonitorFromPoint((0, 0), win32con.MONITOR_DEFAULTTOPRIMARY)
+            left, top, right, bottom = win32api.GetMonitorInfo(mon)["Work"]
+        except Exception:
+            left, top, right, bottom = 0, 0, t.winfo_screenwidth(), t.winfo_screenheight()
+        margin = 16
+        tkinter.Wm.geometry(t, f"{w}x{h}+{right - w - margin}+{bottom - h - margin}")
+        t.deiconify()
+        t.attributes("-topmost", True)
 
     def install_update(self):
         path = self.update_file
@@ -1423,7 +1474,7 @@ class App(ctk.CTk):
             return
         self.set_status("Installiere Update – Wallura startet danach neu …")
         try:
-            subprocess.Popen([str(path), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+            subprocess.Popen([str(path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
                              creationflags=0x00000008 | 0x00000200, close_fds=True)
         except Exception as e:
             self.set_status(f"Update-Installer ließ sich nicht starten: {e}", True)
@@ -1485,6 +1536,8 @@ class App(ctk.CTk):
             pystray.MenuItem("Wallura öffnen", lambda: self.ui(self.show_window), default=True),
             pystray.MenuItem(lambda item: "Fortsetzen" if self.player.paused_manual else "Pause",
                              lambda: self.ui(self.toggle_pause)),
+            pystray.MenuItem(lambda item: f"Update v{(self.update_info or {}).get('version', '')} installieren",
+                             lambda: self.ui(self.install_update), visible=lambda item: bool(self.update_file)),
             pystray.MenuItem("Nächstes Wallpaper", lambda: self.ui(self.next_wallpaper)),
             pystray.MenuItem("Wallpaper stoppen", lambda: self.ui(self.stop_wallpaper)),
             pystray.Menu.SEPARATOR,
