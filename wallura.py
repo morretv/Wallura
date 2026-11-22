@@ -1,0 +1,1386 @@
+# -*- coding: utf-8 -*-
+"""
+Wallura – Live-Wallpaper-Engine für Windows 10/11
+
+Quellen : lokale Dateien (mp4, webm, mkv, gif, Bilder ...), Web-Links (direkte Video-Links
+          oder alles, was yt-dlp kann) und YouTube-Links.
+Rendering: mpv, eingebettet hinter den Desktop-Icons (Progman/WorkerW-Trick).
+"""
+import ctypes
+import hashlib
+import io
+import json
+import os
+import queue
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+import urllib.request
+import uuid
+import winreg
+from pathlib import Path
+from tkinter import filedialog
+
+import customtkinter as ctk
+import pystray
+import win32api
+import win32con
+import win32event
+import win32gui
+import win32job
+import win32process
+import winerror
+from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+# ----------------------------------------------------------------------------- Pfade
+APP_NAME = "Wallura"
+APP_VERSION = "1.1.0"   # wird vom Build / GitHub-Workflow aus dem Release-Tag gesetzt
+# GitHub-Repo für automatische Updates ("benutzername/repo"). Dort muss pro Version ein Release
+# mit der Datei Wallura-Setup.exe liegen (Repo bzw. Releases müssen öffentlich sein).
+GITHUB_REPO = "MorreTv/Wallura"
+APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+DATA_DIR = Path(os.environ.get("APPDATA", str(APP_DIR))) / APP_NAME
+# Umzug von der alten Version: %APPDATA%\\LiveWall -> %APPDATA%\\Wallura (Einstellungen, Downloads, Tools)
+OLD_APP_NAME = "LiveWall"
+_OLD_DIR = DATA_DIR.parent / OLD_APP_NAME
+if _OLD_DIR.exists() and not DATA_DIR.exists():
+    try:
+        shutil.move(str(_OLD_DIR), str(DATA_DIR))
+    except Exception:
+        pass
+LIB_DIR = DATA_DIR / "downloads"
+THUMB_DIR = DATA_DIR / "thumbs"
+TOOLS_USER = DATA_DIR / "tools"
+TOOLS_APP = APP_DIR / "tools"
+UPDATE_DIR = DATA_DIR / "update"
+CONFIG_FILE = DATA_DIR / "config.json"
+for _d in (DATA_DIR, LIB_DIR, THUMB_DIR, TOOLS_USER, UPDATE_DIR):
+    _d.mkdir(parents=True, exist_ok=True)
+
+CREATE_NO_WINDOW = 0x08000000
+ACCENT = "#4cc2ff"
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Wallura"}
+
+VIDEO_EXT = (".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".gif")
+IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
+MEDIA_EXT = VIDEO_EXT + IMAGE_EXT
+YT_RE = re.compile(r"(youtube\.com|youtu\.be)", re.I)
+YT_ID_RE = re.compile(r"(?:v=|youtu\.be/|/shorts/|/embed/|/live/)([A-Za-z0-9_-]{11})")
+
+FIT_MAP = {"Füllen (zuschneiden)": "cover", "Einpassen (Balken)": "contain", "Strecken": "stretch"}
+QUALITIES = ["720", "1080", "1440", "2160"]
+KIND_LABEL = {"local": "Lokal", "youtube": "YouTube", "web": "Web"}
+
+DEFAULTS = {
+    "items": [],
+    "current": None,      # alt (vor 1.1) – wird zu "assign" migriert
+    "assign": {},         # Monitor-Index (als Text) -> Wallpaper-ID
+    "volume": 0,
+    "fit": "cover",
+    "monitor": "all",
+    "quality": "1080",
+    "pause_fullscreen": True,
+    "autostart": False,
+    "auto_update": True,
+    "update_repo": "",    # optional: überschreibt GITHUB_REPO
+}
+
+
+# ----------------------------------------------------------------------------- Config
+def load_config():
+    cfg = dict(DEFAULTS)
+    try:
+        cfg.update(json.loads(CONFIG_FILE.read_text(encoding="utf-8")))
+    except Exception:
+        pass
+    if DATA_DIR.exists() and not _OLD_DIR.exists():  # Pfade heruntergeladener Dateien auf den neuen Ordner umbiegen
+        old = str(_OLD_DIR)
+        for it in cfg.get("items", []):
+            if isinstance(it.get("src"), str) and it["src"].startswith(old):
+                it["src"] = str(DATA_DIR) + it["src"][len(old):]
+    return cfg
+
+
+def save_config(cfg):
+    try:
+        CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+# ----------------------------------------------------------------------------- Tools & Helfer
+def find_tool(name):
+    exe = f"{name}.exe"
+    links = Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links"
+    for base in (TOOLS_USER, TOOLS_APP, APP_DIR, links):
+        p = base / exe
+        if p.exists():
+            return str(p)
+    return shutil.which(name)
+
+
+def run_hidden(cmd, timeout=60):
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       creationflags=CREATE_NO_WINDOW, timeout=timeout)
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def http_get(url, timeout=20):
+    req = urllib.request.Request(url, headers=UA)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def detect_kind(src):
+    if re.match(r"https?://", src, re.I):
+        return "youtube" if YT_RE.search(src) else "web"
+    return "local"
+
+
+def is_direct_media(url):
+    return urllib.parse.urlparse(url).path.lower().endswith(MEDIA_EXT)
+
+
+def shorten(text, n):
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def refresh_wallpaper():
+    """Zeigt nach dem Beenden wieder das normale Windows-Hintergrundbild."""
+    try:
+        ctypes.windll.user32.SystemParametersInfoW(0x0014, 0, None, 0x03)
+    except Exception:
+        pass
+
+
+# ----------------------------------------------------------------------------- Thumbnails & Metadaten
+def placeholder(w=480, h=270):
+    img = Image.new("RGB", (w, h), (32, 34, 40))
+    ImageDraw.Draw(img).polygon([(w * .43, h * .35), (w * .43, h * .65), (w * .60, h * .5)], fill=(90, 95, 110))
+    return img
+
+
+def make_icon(size=64):
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((2, 2, size - 2, size - 2), radius=size // 4, fill=(76, 194, 255, 255))
+    d.polygon([(size * .38, size * .28), (size * .38, size * .72), (size * .74, size * .5)], fill=(255, 255, 255, 255))
+    return img
+
+
+def save_thumb(item_id, img):
+    img = ImageOps.fit(img.convert("RGB"), (480, 270))
+    img.save(THUMB_DIR / f"{item_id}.jpg", quality=85)
+
+
+def make_local_thumb(item_id, path):
+    path = Path(path)
+    try:
+        if path.suffix.lower() in IMAGE_EXT:
+            save_thumb(item_id, Image.open(path))
+            return
+        mpv = find_tool("mpv")
+        if not mpv:
+            return
+        tmp = THUMB_DIR / f"tmp_{item_id}"
+        tmp.mkdir(exist_ok=True)
+        try:
+            run_hidden([mpv, "--no-config", "--no-audio", "--hwdec=no", "--vo=image", "--vo-image-format=jpg",
+                        f"--vo-image-outdir={tmp}", "--start=10%", "--frames=1", "--no-terminal", str(path)], 45)
+            files = sorted(tmp.glob("*.jpg"))
+            if files:
+                save_thumb(item_id, Image.open(files[0]))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def fetch_meta(url):
+    """-> (Titel, Thumbnail-URL oder None)"""
+    if YT_RE.search(url):
+        m = YT_ID_RE.search(url)
+        thumb = f"https://img.youtube.com/vi/{m.group(1)}/mqdefault.jpg" if m else None
+        try:
+            data = json.loads(http_get("https://www.youtube.com/oembed?format=json&url="
+                                       + urllib.parse.quote(url, safe="")))
+            return data.get("title", url), thumb or data.get("thumbnail_url")
+        except Exception:
+            return url, thumb
+    if is_direct_media(url):
+        return Path(urllib.parse.urlparse(url).path).name or url, None
+    ytdlp = find_tool("yt-dlp")
+    if ytdlp:
+        try:
+            code, out = run_hidden([ytdlp, "--no-playlist", "--skip-download", "--no-warnings",
+                                    "--print", "%(title)s", "--print", "%(thumbnail)s", url], 45)
+            lines = [l.strip() for l in out.splitlines() if l.strip()]
+            if code == 0 and lines:
+                thumb = lines[1] if len(lines) > 1 and lines[1].startswith("http") else None
+                return lines[0], thumb
+        except Exception:
+            pass
+    return urllib.parse.urlparse(url).netloc or url, None
+
+
+# ----------------------------------------------------------------------------- Download
+def download_item(item, quality, progress):
+    """Lädt item['src'] in den Download-Ordner. -> Pfad der Datei"""
+    url = item["src"]
+    if is_direct_media(url):
+        ext = Path(urllib.parse.urlparse(url).path).suffix or ".mp4"
+        dest, tmp = LIB_DIR / f"{item['id']}{ext}", LIB_DIR / f"{item['id']}.part"
+        with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=30) as r, open(tmp, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            done = 0
+            while True:
+                chunk = r.read(1 << 16)
+                if not chunk:
+                    break
+                f.write(chunk)
+                done += len(chunk)
+                if total:
+                    progress(done * 100 / total)
+        tmp.replace(dest)
+        return dest
+
+    ytdlp = find_tool("yt-dlp")
+    if not ytdlp:
+        raise RuntimeError("yt-dlp fehlt – bitte links auf „Tools installieren“ klicken.")
+    ffmpeg = find_tool("ffmpeg")
+    q = quality
+    fmt = (f"bv*[height<=?{q}]+ba/b[height<=?{q}]/b" if ffmpeg
+           else f"b[height<=?{q}][ext=mp4]/b[height<=?{q}]/b")
+    cmd = [ytdlp, "--no-playlist", "--newline", "--no-warnings", "-f", fmt,
+           "-o", str(LIB_DIR / f"{item['id']}.%(ext)s"),
+           "--progress-template", "download:%(progress._percent_str)s"]
+    if ffmpeg:
+        cmd += ["--merge-output-format", "mp4", "--ffmpeg-location", str(Path(ffmpeg).parent)]
+    cmd.append(url)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            encoding="utf-8", errors="replace", creationflags=CREATE_NO_WINDOW)
+    last = ""
+    for line in proc.stdout:
+        last = line.strip() or last
+        m = re.search(r"(\d+(?:\.\d+)?)%", line)
+        if m:
+            progress(float(m.group(1)))
+    proc.wait()
+    files = [p for p in LIB_DIR.glob(f"{item['id']}.*") if p.suffix not in (".part", ".ytdl")]
+    if proc.returncode != 0 or not files:
+        raise RuntimeError(last or "Download fehlgeschlagen")
+    return max(files, key=lambda p: p.stat().st_mtime)
+
+
+def install_tools(say):
+    """yt-dlp direkt von GitHub laden, mpv über winget installieren (falls es fehlt)."""
+    msgs = []
+    try:
+        say("Lade yt-dlp …")
+        data = http_get("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe", timeout=180)
+        tmp = TOOLS_USER / "yt-dlp.exe.tmp"
+        tmp.write_bytes(data)
+        tmp.replace(TOOLS_USER / "yt-dlp.exe")
+        msgs.append("yt-dlp aktualisiert")
+    except Exception as e:
+        msgs.append(f"yt-dlp-Download fehlgeschlagen ({e})")
+    if not find_tool("mpv"):
+        for pkg in ("shinchiro.mpv", "mpv"):
+            say(f"Installiere mpv über winget ({pkg}) …")
+            try:
+                run_hidden(["winget", "install", "-e", "--id" if "." in pkg else "--name", pkg,
+                            "--accept-source-agreements", "--accept-package-agreements"], 900)
+            except Exception:
+                pass
+            if find_tool("mpv"):
+                break
+        msgs.append("mpv installiert" if find_tool("mpv")
+                    else f"mpv konnte nicht installiert werden – mpv.exe bitte manuell nach {TOOLS_USER} kopieren")
+    return " · ".join(msgs)
+
+
+# ----------------------------------------------------------------------------- Updates (GitHub-Releases)
+def parse_version(v):
+    nums = [int(x) for x in re.findall(r"\d+", str(v))][:4]
+    return tuple(nums + [0] * (4 - len(nums)))
+
+
+def check_update(repo):
+    """Fragt das neueste GitHub-Release ab. -> Info-Dict oder None, wenn nichts Neueres da ist."""
+    data = json.loads(http_get(f"https://api.github.com/repos/{repo}/releases/latest", 15))
+    tag = str(data.get("tag_name", ""))
+    if parse_version(tag) <= parse_version(APP_VERSION):
+        return None
+    for a in data.get("assets", []):
+        url = a.get("browser_download_url", "")
+        if a.get("name", "").lower().endswith("setup.exe") and url.startswith("https://github.com/"):
+            return {"version": tag.lstrip("vV"), "url": url, "digest": a.get("digest") or "",
+                    "page": data.get("html_url", "")}
+    return None
+
+
+def _sha256_ok(path, digest):
+    if not digest.lower().startswith("sha256:"):
+        return True  # GitHub liefert nicht für jedes Asset eine Prüfsumme
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest().lower() == digest[7:].lower()
+
+
+def download_update(info, progress):
+    """Lädt den Installer nach %APPDATA%\\Wallura\\update. -> Pfad"""
+    dest = UPDATE_DIR / f"Wallura-Setup-{info['version']}.exe"
+    if dest.exists() and _sha256_ok(dest, info.get("digest", "")):
+        return dest
+    tmp = dest.with_suffix(".part")
+    with urllib.request.urlopen(urllib.request.Request(info["url"], headers=UA), timeout=30) as r, open(tmp, "wb") as f:
+        total = int(r.headers.get("Content-Length") or 0)
+        done = 0
+        while True:
+            chunk = r.read(1 << 16)
+            if not chunk:
+                break
+            f.write(chunk)
+            done += len(chunk)
+            if total:
+                progress(done * 100 / total)
+    if tmp.stat().st_size < 1_000_000 or not _sha256_ok(tmp, info.get("digest", "")):
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError("Download beschädigt (Prüfsumme stimmt nicht)")
+    tmp.replace(dest)
+    return dest
+
+
+def cleanup_old_updates():
+    """Löscht alte / halbfertige Installer aus dem Update-Ordner."""
+    try:
+        for p in UPDATE_DIR.glob("*"):
+            m = re.search(r"Setup-([\d.]+)\.exe$", p.name)
+            if p.suffix == ".part" or (m and parse_version(m.group(1)) <= parse_version(APP_VERSION)):
+                p.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+# ----------------------------------------------------------------------------- Windows-Desktop-Magie
+def get_monitors():
+    mons = []
+    for hm, _hdc, _rect in win32api.EnumDisplayMonitors():
+        info = win32api.GetMonitorInfo(hm)
+        l, t, r, b = info["Monitor"]
+        mons.append({"rect": (l, t, r - l, b - t), "primary": bool(info["Flags"] & 1)})
+    mons.sort(key=lambda m: (not m["primary"], m["rect"][0], m["rect"][1]))
+    return mons
+
+
+def get_wallpaper_parent():
+    """Liefert (hwnd, progman_modus). Klassisch: WorkerW hinter den Icons.
+    Windows 11 24H2: WorkerW liegt als Kind in Progman -> dann direkt in Progman einbetten."""
+    progman = win32gui.FindWindow("Progman", None)
+    for wparam, lparam in ((0, 0), (0xD, 0), (0xD, 1)):
+        try:
+            win32gui.SendMessageTimeout(progman, 0x052C, wparam, lparam, win32con.SMTO_NORMAL, 1000)
+        except Exception:
+            pass
+    found = {"w": 0}
+
+    def cb(hwnd, _):
+        if win32gui.FindWindowEx(hwnd, 0, "SHELLDLL_DefView", None):
+            w = win32gui.FindWindowEx(0, hwnd, "WorkerW", None)
+            if w:
+                found["w"] = w
+        return True
+
+    try:
+        win32gui.EnumWindows(cb, None)
+    except Exception:
+        pass
+    if found["w"]:
+        return found["w"], False
+    return progman, True
+
+
+def embed(hwnd, rect):
+    """Hängt das mpv-Fenster hinter die Desktop-Icons und positioniert es auf dem Monitor."""
+    parent, progman_mode = get_wallpaper_parent()
+    style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
+    style &= ~(win32con.WS_POPUP | win32con.WS_CAPTION | win32con.WS_THICKFRAME | win32con.WS_SYSMENU
+               | win32con.WS_MINIMIZEBOX | win32con.WS_MAXIMIZEBOX | win32con.WS_BORDER | win32con.WS_DLGFRAME)
+    style |= win32con.WS_CHILD | win32con.WS_VISIBLE
+    win32gui.SetWindowLong(hwnd, win32con.GWL_STYLE, style)
+    ex = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+    ex = (ex | win32con.WS_EX_TOOLWINDOW | win32con.WS_EX_NOACTIVATE) & ~(
+        win32con.WS_EX_APPWINDOW | win32con.WS_EX_WINDOWEDGE | win32con.WS_EX_CLIENTEDGE)
+    win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex)
+    win32gui.SetParent(hwnd, parent)
+    place(hwnd, rect, parent, progman_mode)
+
+
+def place(hwnd, rect, parent=None, progman_mode=None):
+    if parent is None:
+        parent = win32gui.GetParent(hwnd)
+        progman_mode = win32gui.GetClassName(parent) == "Progman"
+    x, y, w, h = rect
+    cx, cy = win32gui.ScreenToClient(parent, (x, y))
+    insert_after = win32con.HWND_TOP
+    if progman_mode:  # direkt unter die Icon-Ebene (SHELLDLL_DefView), über das Standard-Hintergrundbild
+        dv = win32gui.FindWindowEx(parent, 0, "SHELLDLL_DefView", None)
+        if dv:
+            insert_after = dv
+    win32gui.SetWindowPos(hwnd, insert_after, cx, cy, w, h,
+                          win32con.SWP_NOACTIVATE | win32con.SWP_SHOWWINDOW | win32con.SWP_FRAMECHANGED)
+
+
+_SKIP_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd", "mpv",
+                 "XamlExplorerHostIslandWindow", "Windows.UI.Core.CoreWindow"}
+
+
+def fullscreen_app_active():
+    """True, wenn gerade eine Vollbild-App (Spiel, F11-Video ...) im Vordergrund ist."""
+    try:
+        hwnd = win32gui.GetForegroundWindow()
+        if not hwnd or not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd):
+            return False
+        if win32gui.GetClassName(hwnd) in _SKIP_CLASSES:
+            return False
+        l, t, r, b = win32gui.GetWindowRect(hwnd)
+        ml, mt, mr, mb = win32api.GetMonitorInfo(
+            win32api.MonitorFromWindow(hwnd, win32con.MONITOR_DEFAULTTONEAREST))["Monitor"]
+        return l <= ml and t <= mt and r >= mr and b >= mb
+    except Exception:
+        return False
+
+
+# ----------------------------------------------------------------------------- Player
+class Player:
+    def __init__(self, cfg, on_error):
+        self.cfg = cfg
+        self.on_error = on_error
+        self.instances = {}  # Monitor-Index -> Instanz (jeder Monitor hat seinen eigenen mpv-Prozess)
+        self.paused_manual = False
+        self._paused = False
+        self._restarts = {}
+        self._tick = 0
+        self.lock = threading.RLock()
+        self._start_lock = threading.Lock()
+        self._quit = threading.Event()
+        self.job = self._make_job()
+        threading.Thread(target=self._watchdog, daemon=True).start()
+
+    @property
+    def active(self):
+        return bool(self.instances)
+
+    # -- mpv-Prozesse sterben automatisch mit Wallura (auch bei Task-Manager-Kill)
+    @staticmethod
+    def _make_job():
+        try:
+            job = win32job.CreateJobObject(None, "")
+            info = win32job.QueryInformationJobObject(job, win32job.JobObjectExtendedLimitInformation)
+            info["BasicLimitInformation"]["LimitFlags"] |= win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            win32job.SetInformationJobObject(job, win32job.JobObjectExtendedLimitInformation, info)
+            return job
+        except Exception:
+            return None
+
+    def _add_to_job(self, proc):
+        if self.job:
+            try:
+                win32job.AssignProcessToJobObject(self.job, int(proc._handle))
+            except Exception:
+                pass
+
+    def _base_cmd(self, mpv, ytdlp):
+        q = self.cfg.get("quality", "1080")
+        vol = int(self.cfg.get("volume", 0))
+        fit = self.cfg.get("fit", "cover")
+        base = [mpv, "--no-config", "--force-window=immediate", "--no-border", "--no-osc", "--osd-level=0",
+                "--no-input-default-bindings", "--loop-file=inf", "--keep-open=yes",
+                "--image-display-duration=inf", "--stop-screensaver=no", "--hwdec=auto-safe",
+                "--audio-display=no", f"--volume={vol}", f"--mute={'yes' if vol == 0 else 'no'}",
+                "--ytdl=yes", f"--ytdl-format=bv*[height<=?{q}]+ba/b[height<=?{q}]/b",
+                "--ytdl-raw-options=no-playlist=", "--no-terminal", "--msg-level=all=warn"]
+        if ytdlp:
+            base.append("--script-opts=ytdl_hook-ytdl_path=" + ytdlp.replace("\\", "/"))
+        if fit == "cover":
+            base.append("--panscan=1.0")
+        elif fit == "stretch":
+            base.append("--keepaspect=no")
+        if self.paused_manual or self._paused:
+            base.append("--pause")
+        return base
+
+    def _ipc(self, inst, command):
+        try:
+            with open(inst["pipe"], "wb", buffering=0) as f:
+                f.write((json.dumps({"command": command}) + "\n").encode("utf-8"))
+        except OSError:
+            pass
+
+    @staticmethod
+    def _find_window(proc, deadline):
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                return None
+            found = []
+
+            def cb(h, _):
+                try:
+                    if (win32process.GetWindowThreadProcessId(h)[1] == proc.pid
+                            and win32gui.GetClassName(h) == "mpv" and win32gui.IsWindowVisible(h)):
+                        found.append(h)
+                except Exception:
+                    pass
+                return True
+
+            win32gui.EnumWindows(cb, None)
+            if found:
+                return found[0]
+            time.sleep(0.15)
+        return None
+
+    # -- öffentliche API
+    def apply(self, assign, force=False):
+        """assign: {Monitor-Index: item}. Startet / wechselt / beendet nur die Monitore, die sich ändern.
+        force=True startet alle neu, force={0, 2} nur diese Monitore. -> True, wenn alles geklappt hat."""
+        with self._start_lock:
+            return self._apply(assign, force)
+
+    def _apply(self, assign, force=False):
+        mons = get_monitors()
+        desired = {i: it for i, it in assign.items() if 0 <= i < len(mons)}
+        ok = True
+        cleared = False
+        for idx in list(self.instances):
+            inst = self.instances[idx]
+            forced = force is True or (isinstance(force, (set, frozenset)) and idx in force)
+            if idx in desired and desired[idx]["id"] == inst["item"]["id"] and not forced \
+                    and inst["proc"].poll() is None:
+                inst["rect"] = mons[idx]["rect"]
+                continue
+            with self.lock:
+                self.instances.pop(idx, None)
+            self._kill(inst)
+            if idx not in desired:
+                cleared = True
+        if cleared:
+            refresh_wallpaper()
+        todo = {i: it for i, it in desired.items() if i not in self.instances}
+        if not todo:
+            if not self.instances:
+                self._paused = False
+            return True
+
+        mpv = find_tool("mpv")
+        if not mpv:
+            self.on_error("mpv fehlt – bitte links auf „Tools installieren“ klicken.")
+            return False
+        ytdlp = find_tool("yt-dlp")
+        if not self.instances:
+            self._paused = self.paused_manual
+        base = self._base_cmd(mpv, ytdlp)
+
+        new = {}
+        for idx, item in todo.items():
+            src = item["src"]
+            if item["kind"] == "local" and not Path(src).exists():
+                self.on_error(f"Datei nicht gefunden: {src}")
+                ok = False
+                continue
+            if item["kind"] == "youtube" and not ytdlp:
+                self.on_error("yt-dlp fehlt (für YouTube nötig) – bitte „Tools installieren“ klicken.")
+                ok = False
+                continue
+            pipe = rf"\\.\pipe\wallura_{os.getpid()}_{idx}"
+            log = DATA_DIR / f"mpv_{idx}.log"
+            cmd = base + [f"--title=Wallura-{os.getpid()}-{idx}", f"--input-ipc-server={pipe}",
+                          f"--log-file={log}", src]
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    creationflags=CREATE_NO_WINDOW)
+            self._add_to_job(proc)
+            new[idx] = {"proc": proc, "pipe": pipe, "rect": mons[idx]["rect"], "hwnd": None, "log": log, "item": item}
+
+        deadline = time.time() + 30
+        for idx, inst in new.items():
+            hwnd = self._find_window(inst["proc"], deadline)
+            if not hwnd:
+                tail = ""
+                try:
+                    tail = " | ".join(inst["log"].read_text(encoding="utf-8", errors="replace").splitlines()[-3:])
+                except Exception:
+                    pass
+                self._kill(inst)
+                self.on_error(f"mpv konnte auf Monitor {idx + 1} nicht starten. " + tail)
+                ok = False
+                continue
+            inst["hwnd"] = hwnd
+            try:
+                embed(hwnd, inst["rect"])
+            except Exception as e:
+                self._kill(inst)
+                self.on_error(f"Einbetten in den Desktop fehlgeschlagen: {e}")
+                ok = False
+                continue
+            with self.lock:
+                self.instances[idx] = inst
+        return ok
+
+    def _restart_one(self, idx):
+        with self._start_lock:
+            if self._quit.is_set() or idx not in self.instances:
+                return
+            assign = {i: inst["item"] for i, inst in self.instances.items()}
+            self._apply(assign, force={idx})
+
+    def _drop(self, idx):
+        with self._start_lock:
+            inst = self.instances.pop(idx, None)
+            if inst:
+                self._kill(inst)
+                refresh_wallpaper()
+                self.on_error(f"Wallpaper auf Monitor {idx + 1} ist mehrfach abgestürzt und wurde gestoppt.")
+
+    @staticmethod
+    def _kill(inst):
+        try:
+            inst["proc"].terminate()
+            inst["proc"].wait(timeout=3)
+        except Exception:
+            try:
+                inst["proc"].kill()
+            except Exception:
+                pass
+
+    def stop(self):
+        self.apply({})
+
+    def shutdown(self):
+        self._quit.set()
+        self.stop()
+
+    def set_volume(self, vol):
+        for inst in list(self.instances.values()):
+            self._ipc(inst, ["set_property", "volume", vol])
+            self._ipc(inst, ["set_property", "mute", vol == 0])
+
+    def set_manual_pause(self, paused):
+        self.paused_manual = paused
+        self._apply_pause(paused)
+
+    def _apply_pause(self, paused):
+        self._paused = paused
+        for inst in list(self.instances.values()):
+            self._ipc(inst, ["set_property", "pause", paused])
+
+    # -- Überwachung: Auto-Pause, Neustart nach Crash, Position halten
+    def _watchdog(self):
+        while not self._quit.wait(1.0):
+            insts = dict(self.instances)
+            if not insts:
+                continue
+            self._tick += 1
+            now = time.time()
+            for idx, inst in insts.items():
+                if inst["proc"].poll() is None or inst.get("restarting"):
+                    continue
+                inst["restarting"] = True  # nur einmal pro Absturz neu starten
+                r = [t for t in self._restarts.get(idx, []) if now - t < 120]
+                if len(r) < 3:
+                    r.append(now)
+                    self._restarts[idx] = r
+                    threading.Thread(target=self._restart_one, args=(idx,), daemon=True).start()
+                else:
+                    threading.Thread(target=self._drop, args=(idx,), daemon=True).start()
+            alive = [i for i in insts.values() if i["proc"].poll() is None]
+            want = self.paused_manual or (self.cfg.get("pause_fullscreen", True) and fullscreen_app_active())
+            if want != self._paused:
+                self._apply_pause(want)
+            if self._tick % 5 == 0:
+                for inst in alive:
+                    try:
+                        hwnd = inst["hwnd"]
+                        if not win32gui.IsWindow(hwnd):
+                            continue
+                        l, t, r, b = win32gui.GetWindowRect(hwnd)
+                        x, y, w, h = inst["rect"]
+                        if (l, t, r - l, b - t) != (x, y, w, h):
+                            place(hwnd, inst["rect"])
+                    except Exception:
+                        pass
+
+# ----------------------------------------------------------------------------- Autostart
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+
+def set_autostart(on):
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+        if on:
+            if getattr(sys, "frozen", False):
+                cmd = f'"{sys.executable}" --minimized'
+            else:
+                py = Path(sys.executable)
+                pyw = py.with_name("pythonw.exe")
+                cmd = f'"{pyw if pyw.exists() else py}" "{Path(__file__).resolve()}" --minimized'
+            winreg.SetValueEx(k, APP_NAME, 0, winreg.REG_SZ, cmd)
+        else:
+            try:
+                winreg.DeleteValue(k, APP_NAME)
+            except FileNotFoundError:
+                pass
+
+
+def migrate_autostart():
+    """Alter Autostart-Eintrag „LiveWall“ -> „Wallura“ (zeigt auf die aktuelle Version)."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as k:
+            try:
+                winreg.QueryValueEx(k, OLD_APP_NAME)
+            except FileNotFoundError:
+                return
+            winreg.DeleteValue(k, OLD_APP_NAME)
+        set_autostart(True)
+    except OSError:
+        pass
+
+
+def is_autostart():
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ) as k:
+            winreg.QueryValueEx(k, APP_NAME)
+            return True
+    except OSError:
+        return False
+
+
+# ----------------------------------------------------------------------------- GUI
+class App(ctk.CTk):
+    def __init__(self, start_hidden=False):
+        super().__init__()
+        self.title(f"Wallura {APP_VERSION}")
+        self.geometry("1120x800")
+        self.minsize(980, 640)
+        self.cfg = load_config()
+        self._migrate_config()
+        self._q = queue.Queue()
+        self._resize_job = None
+        self._last_cols = 0
+        self._mon_rects = []
+        self._mon_img = None
+        self._on_map = {}
+        self._mon_count = 1
+        self.update_info = None
+        self.update_file = None
+        self.player = Player(self.cfg, on_error=lambda m: self.ui(lambda: self.set_status(m, True)))
+        self.tray = None
+
+        self._build_ui()
+        self.refresh_library()
+        self._update_tools_banner()
+        self._setup_tray()
+        self.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
+        self.bind("<Configure>", self._on_resize)
+        self.after(100, self._poll)
+        if start_hidden:
+            self.withdraw()
+        if self._assign_items():
+            threading.Thread(target=self._startup_worker, daemon=True).start()
+        cleanup_old_updates()
+        self.after(8000, self._auto_check)
+
+    def _startup_worker(self):
+        self.player.apply(self._assign_items())
+        self.ui(self.refresh_library)
+
+    def _migrate_config(self):
+        """Alte Configs (ein Wallpaper für alle) -> Zuordnung pro Monitor."""
+        a = self.cfg.get("assign")
+        if not isinstance(a, dict):
+            a = {}
+        cur = self.cfg.get("current")
+        sel = str(self.cfg.get("monitor", "all"))
+        if not a and cur:
+            idxs = [int(sel)] if sel.isdigit() else range(max(1, len(get_monitors())))
+            a = {str(i): cur for i in idxs}
+        self.cfg["assign"] = a
+        self.cfg["current"] = None
+        if sel != "all" and not sel.isdigit():
+            self.cfg["monitor"] = "all"
+        save_config(self.cfg)
+
+    def _assign_items(self, assign=None):
+        """{Monitor-Index: item} der gespeicherten Zuordnung (nur gültige Monitore und vorhandene Einträge)."""
+        assign = self.cfg.get("assign", {}) if assign is None else assign
+        n = len(get_monitors())
+        out = {}
+        for k, iid in assign.items():
+            item = self.find_item(iid)
+            if item and str(k).isdigit() and int(k) < n:
+                out[int(k)] = item
+        return out
+
+    def _target_indices(self):
+        """Auf welche Monitore wirkt ein Klick in der Bibliothek gerade?"""
+        n = len(get_monitors())
+        sel = str(self.cfg.get("monitor", "all"))
+        if sel.isdigit() and int(sel) < n:
+            return [int(sel)]
+        return list(range(n))
+
+    # -- Thread-sichere UI-Aufrufe
+    def ui(self, fn):
+        self._q.put(fn)
+
+    def _poll(self):
+        while True:
+            try:
+                fn = self._q.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn()
+            except Exception:
+                pass
+        self.after(100, self._poll)
+
+    # -- Aufbau
+    def _build_ui(self):
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+
+        side = ctk.CTkFrame(self, width=270, corner_radius=0)
+        side.grid(row=0, column=0, sticky="nsew")
+        side.grid_propagate(False)
+        # unten festgepinnte Buttons
+        self.btn_stop = ctk.CTkButton(side, text="■  Wallpaper stoppen", fg_color="#7a2f2f", hover_color="#a03c3c",
+                                      command=self.stop_wallpaper)
+        self.btn_stop.pack(side="bottom", fill="x", padx=20, pady=(4, 16))
+        ctk.CTkButton(side, text="Tools installieren / aktualisieren", fg_color="gray25", hover_color="gray35",
+                      command=self.on_install_tools).pack(side="bottom", fill="x", padx=20, pady=4)
+        ctk.CTkButton(side, text="Nach Updates suchen", fg_color="gray25", hover_color="gray35",
+                      command=lambda: self.check_updates(True)).pack(side="bottom", fill="x", padx=20, pady=4)
+
+        body = ctk.CTkScrollableFrame(side, fg_color="transparent")
+        body.pack(side="top", fill="both", expand=True, padx=(6, 0), pady=(6, 4))
+        px = 12
+        ctk.CTkLabel(body, text="Wallura", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", padx=px, pady=(8, 0))
+        ctk.CTkLabel(body, text=f"Live-Wallpaper für Windows · v{APP_VERSION}", text_color="gray60").pack(anchor="w", padx=px, pady=(0, 12))
+        ctk.CTkButton(body, text="＋  Lokale Datei", height=36, command=self.add_local).pack(fill="x", padx=px, pady=4)
+        ctk.CTkButton(body, text="＋  Link (YouTube / Web)", height=36, command=self.add_link).pack(fill="x", padx=px, pady=4)
+        ctk.CTkFrame(body, height=1, fg_color="gray30").pack(fill="x", padx=px, pady=10)
+
+        ctk.CTkLabel(body, text="Monitor – Ziel für die Auswahl", anchor="w").pack(fill="x", padx=px)
+        self.mon_preview = ctk.CTkLabel(body, text="", cursor="hand2")
+        self.mon_preview.pack(padx=px, pady=(4, 2))
+        self.mon_preview.bind("<Button-1>", self._on_preview_click)
+        self.mon_hint = ctk.CTkLabel(body, text="", anchor="w", text_color="gray75")
+        self.mon_hint.pack(fill="x", padx=px)
+        self.btn_all = ctk.CTkButton(body, text="Alle Monitore gleich", height=28,
+                                     command=lambda: self.select_monitor("all"))
+        self.btn_all.pack(fill="x", padx=px, pady=(2, 2))
+        ctk.CTkLabel(body, text="Monitor anklicken, dann in der Bibliothek ein Wallpaper wählen.", anchor="w",
+                     justify="left", wraplength=205, text_color="gray55",
+                     font=ctk.CTkFont(size=11)).pack(fill="x", padx=px, pady=(0, 8))
+
+        ctk.CTkLabel(body, text="Lautstärke", anchor="w").pack(fill="x", padx=px)
+        self.vol = ctk.CTkSlider(body, from_=0, to=100, number_of_steps=100, command=self.on_volume)
+        self.vol.set(self.cfg["volume"])
+        self.vol.pack(fill="x", padx=px, pady=(2, 10))
+
+        ctk.CTkLabel(body, text="Anpassung", anchor="w").pack(fill="x", padx=px)
+        self.fit_menu = ctk.CTkOptionMenu(body, values=list(FIT_MAP), command=self.on_fit)
+        self.fit_menu.set(next(k for k, v in FIT_MAP.items() if v == self.cfg["fit"]))
+        self.fit_menu.pack(fill="x", padx=px, pady=(2, 10))
+
+        ctk.CTkLabel(body, text="Max. Qualität (Streams, p)", anchor="w").pack(fill="x", padx=px)
+        self.q_menu = ctk.CTkOptionMenu(body, values=QUALITIES, command=self.on_quality)
+        self.q_menu.set(str(self.cfg["quality"]))
+        self.q_menu.pack(fill="x", padx=px, pady=(2, 10))
+
+        self.sw_pause = ctk.CTkSwitch(body, text="Pause bei Vollbild-Apps", command=self.on_pause_fs)
+        self.sw_pause.pack(anchor="w", padx=px, pady=4)
+        if self.cfg["pause_fullscreen"]:
+            self.sw_pause.select()
+        self.sw_auto = ctk.CTkSwitch(body, text="Mit Windows starten", command=self.on_autostart)
+        self.sw_auto.pack(anchor="w", padx=px, pady=4)
+        if is_autostart():
+            self.sw_auto.select()
+        self.sw_upd = ctk.CTkSwitch(body, text="Updates automatisch laden", command=self.on_auto_update)
+        self.sw_upd.pack(anchor="w", padx=px, pady=4)
+        if self.cfg.get("auto_update", True):
+            self.sw_upd.select()
+
+        main = ctk.CTkFrame(self, fg_color="transparent")
+        main.grid(row=0, column=1, sticky="nsew", padx=(10, 10), pady=10)
+        main.grid_columnconfigure(0, weight=1)
+        main.grid_rowconfigure(2, weight=1)
+        ctk.CTkLabel(main, text="Bibliothek", font=ctk.CTkFont(size=22, weight="bold")).grid(row=0, column=0, sticky="w", padx=8)
+        top = ctk.CTkFrame(main, fg_color="transparent")
+        top.grid(row=1, column=0, sticky="we")
+        self.banner = ctk.CTkLabel(top, text="", text_color="#ffb454", anchor="w")
+        self.banner.pack(fill="x", padx=8, pady=(2, 4))
+        self.upd_frame = ctk.CTkFrame(top, corner_radius=10, fg_color="#1d3a4d")  # erst sichtbar, wenn ein Update da ist
+        self.upd_label = ctk.CTkLabel(self.upd_frame, text="", anchor="w")
+        self.upd_label.pack(side="left", padx=12, pady=8)
+        self.upd_btn = ctk.CTkButton(self.upd_frame, text="", width=160)
+        self.upd_btn.pack(side="right", padx=8, pady=6)
+        self.scroll = ctk.CTkScrollableFrame(main, corner_radius=12)
+        self.scroll.grid(row=2, column=0, sticky="nsew")
+
+        bar = ctk.CTkFrame(main, fg_color="transparent")
+        bar.grid(row=3, column=0, sticky="we", pady=(8, 0))
+        bar.grid_columnconfigure(0, weight=1)
+        self.status = ctk.CTkLabel(bar, text="Bereit.", anchor="w", text_color="gray80")
+        self.status.grid(row=0, column=0, sticky="we", padx=8)
+        self.progress = ctk.CTkProgressBar(bar, width=220)
+        self.progress.set(0)
+        self.progress.grid(row=0, column=1, padx=8)
+
+    # -- Bibliothek
+    def find_item(self, item_id):
+        return next((i for i in self.cfg["items"] if i["id"] == item_id), None)
+
+    def _cols(self):
+        try:
+            scale = self._get_window_scaling()
+        except Exception:
+            scale = 1.0
+        return max(1, int((self.winfo_width() / scale - 270 - 70) // 272))
+
+    def _on_resize(self, e):
+        if e.widget is not self:
+            return
+        if self._resize_job:
+            self.after_cancel(self._resize_job)
+        self._resize_job = self.after(300, lambda: self._cols() != self._last_cols and self.refresh_library())
+
+    def _thumb_image(self, item):
+        p = THUMB_DIR / f"{item['id']}.jpg"
+        try:
+            img = Image.open(p).convert("RGB") if p.exists() else placeholder()
+        except Exception:
+            img = placeholder()
+        return ctk.CTkImage(ImageOps.fit(img, (480, 270)), size=(240, 135))
+
+    def refresh_library(self):
+        self._refresh_monitor_ui()
+        for w in self.scroll.winfo_children():
+            w.destroy()
+        on = {}
+        for idx, it in self._assign_items().items():
+            on.setdefault(it["id"], []).append(idx)
+        self._on_map, self._mon_count = on, len(get_monitors())
+        cols = self._last_cols = self._cols()
+        if not self.cfg["items"]:
+            ctk.CTkLabel(self.scroll, text="Noch leer – füge links eine Datei oder einen YouTube-Link hinzu.",
+                         text_color="gray60").grid(row=0, column=0, padx=20, pady=30)
+            return
+        for n, item in enumerate(self.cfg["items"]):
+            self._card(item, n // cols, n % cols)
+
+    def _card(self, item, r, c):
+        on = sorted(self._on_map.get(item["id"], []))
+        active = bool(on) and self.player.active
+        card = ctk.CTkFrame(self.scroll, corner_radius=12, border_width=2 if active else 0, border_color=ACCENT)
+        card.grid(row=r, column=c, padx=8, pady=8, sticky="n")
+        lbl = ctk.CTkLabel(card, image=self._thumb_image(item), text="", cursor="hand2")
+        lbl.pack(padx=8, pady=(8, 4))
+        lbl.bind("<Button-1>", lambda e, it=item: self.apply(it))
+        ctk.CTkLabel(card, text=shorten(item["title"], 34), font=ctk.CTkFont(size=13, weight="bold"),
+                     anchor="w", width=240).pack(padx=10, anchor="w")
+        if on:
+            if self._mon_count == 1:
+                where = "Aktiv"
+            elif len(on) == self._mon_count:
+                where = "Aktiv auf allen Monitoren"
+            else:
+                where = "Aktiv auf Monitor " + ", ".join(str(i + 1) for i in on)
+            ctk.CTkLabel(card, text="▶ " + where, text_color=ACCENT, anchor="w", width=240).pack(padx=10, anchor="w")
+        row = ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=8, pady=(2, 8))
+        ctk.CTkLabel(row, text=KIND_LABEL.get(item["kind"], "?"), text_color="gray65").pack(side="left", padx=4)
+        ctk.CTkButton(row, text="✕", width=30, fg_color="transparent", hover_color="#5a2a2a",
+                      command=lambda it=item: self.remove(it)).pack(side="right")
+        if item["kind"] != "local":
+            ctk.CTkButton(row, text="⬇", width=30, fg_color="transparent", hover_color="gray30",
+                          command=lambda it=item: self.download(it)).pack(side="right")
+        ctk.CTkButton(row, text="▶", width=30, command=lambda it=item: self.apply(it)).pack(side="right", padx=2)
+
+    # -- Hinzufügen / Entfernen
+    def add_local(self):
+        pats = " ".join(f"*{e}" for e in MEDIA_EXT)
+        files = filedialog.askopenfilenames(title="Wallpaper auswählen",
+                                            filetypes=[("Videos & Bilder", pats), ("Alle Dateien", "*.*")])
+        for f in files:
+            item = {"id": uuid.uuid4().hex[:10], "title": Path(f).stem, "kind": "local", "src": f}
+            self.cfg["items"].append(item)
+            threading.Thread(target=self._thumb_worker, args=(item,), daemon=True).start()
+        if files:
+            save_config(self.cfg)
+            self.refresh_library()
+
+    def add_link(self):
+        dlg = ctk.CTkInputDialog(text="YouTube-, Video- oder Web-Link einfügen:", title="Link hinzufügen")
+        url = (dlg.get_input() or "").strip()
+        if not url:
+            return
+        if not re.match(r"https?://", url, re.I):
+            self.set_status("Das sieht nicht nach einem Link aus (https://…).", True)
+            return
+        item = {"id": uuid.uuid4().hex[:10], "title": url, "kind": detect_kind(url), "src": url}
+        self.cfg["items"].append(item)
+        save_config(self.cfg)
+        self.refresh_library()
+        threading.Thread(target=self._meta_worker, args=(item,), daemon=True).start()
+
+    def _thumb_worker(self, item):
+        make_local_thumb(item["id"], item["src"])
+        self.ui(self.refresh_library)
+
+    def _meta_worker(self, item):
+        title, thumb = fetch_meta(item["src"])
+        item["title"] = title
+        save_config(self.cfg)
+        if thumb:
+            try:
+                save_thumb(item["id"], Image.open(io.BytesIO(http_get(thumb))))
+            except Exception:
+                pass
+        self.ui(self.refresh_library)
+
+    def remove(self, item):
+        old = self.cfg.get("assign", {})
+        a = {k: v for k, v in old.items() if v != item["id"]}
+        changed = len(a) != len(old)
+        self.cfg["assign"] = a
+        self.cfg["items"] = [i for i in self.cfg["items"] if i["id"] != item["id"]]
+        (THUMB_DIR / f"{item['id']}.jpg").unlink(missing_ok=True)
+        if item["kind"] == "local" and Path(item["src"]).parent == LIB_DIR:
+            Path(item["src"]).unlink(missing_ok=True)  # nur selbst heruntergeladene Dateien löschen
+        save_config(self.cfg)
+        if changed:
+            threading.Thread(target=lambda: self.player.apply(self._assign_items()), daemon=True).start()
+        self.refresh_library()
+
+    # -- Wallpaper steuern
+    def apply(self, item):
+        self.set_status(f"Starte „{shorten(item['title'], 40)}“ …")
+        threading.Thread(target=self._apply_worker, args=(item,), daemon=True).start()
+
+    def _apply_worker(self, item):
+        idxs = self._target_indices()
+        a = dict(self.cfg.get("assign", {}))
+        for i in idxs:
+            a[str(i)] = item["id"]
+        ok = self.player.apply(self._assign_items(a))
+        live = {i: inst["item"]["id"] for i, inst in list(self.player.instances.items())}
+        for i in idxs:  # nur übernehmen, was wirklich läuft
+            if live.get(i) == item["id"]:
+                self.cfg["assign"][str(i)] = item["id"]
+        save_config(self.cfg)
+        if ok:
+            where = "" if len(idxs) != 1 or self._mon_count == 1 else f" (Monitor {idxs[0] + 1})"
+            self.ui(lambda: self.set_status(f"Aktiv: {shorten(item['title'], 60)}{where}"))
+        self.ui(self.refresh_library)
+
+    def stop_wallpaper(self):
+        a = dict(self.cfg.get("assign", {}))
+        sel = str(self.cfg.get("monitor", "all"))
+        if sel.isdigit():
+            a.pop(sel, None)
+            msg = f"Monitor {int(sel) + 1} gestoppt."
+        else:
+            a = {}
+            msg = "Wallpaper gestoppt."
+        self.cfg["assign"] = a
+        save_config(self.cfg)
+        threading.Thread(target=lambda: (self.player.apply(self._assign_items(a)), self.ui(self.refresh_library)),
+                         daemon=True).start()
+        self.set_status(msg)
+        self.refresh_library()
+
+    def restart_current(self):
+        if self.player.active:
+            threading.Thread(target=lambda: self.player.apply(self._assign_items(), force=True), daemon=True).start()
+
+    def next_wallpaper(self):
+        items = self.cfg["items"]
+        if not items:
+            return
+        idxs = self._target_indices()
+        ids = [i["id"] for i in items]
+        cur = self.cfg.get("assign", {}).get(str(idxs[0])) if idxs else None
+        self.apply(items[(ids.index(cur) + 1) % len(items)] if cur in ids else items[0])
+
+    def toggle_pause(self):
+        self.player.set_manual_pause(not self.player.paused_manual)
+        self.set_status("Pausiert." if self.player.paused_manual else "Läuft weiter.")
+
+    # -- Download
+    def download(self, item):
+        self.set_status(f"Lade „{shorten(item['title'], 40)}“ herunter …")
+        self.progress.set(0)
+        threading.Thread(target=self._download_worker, args=(item,), daemon=True).start()
+
+    def _download_worker(self, item):
+        try:
+            path = download_item(item, self.cfg["quality"], lambda p: self.ui(lambda: self.progress.set(p / 100)))
+        except Exception as e:
+            msg = f"Download fehlgeschlagen: {e}"
+            self.ui(lambda: (self.set_status(msg, True), self.progress.set(0)))
+            return
+        item["origin"] = item["src"]
+        item["kind"], item["src"] = "local", str(path)
+        save_config(self.cfg)
+        if not (THUMB_DIR / f"{item['id']}.jpg").exists():
+            make_local_thumb(item["id"], path)
+        self.ui(lambda: (self.progress.set(1), self.set_status(f"Heruntergeladen: {path.name} (offline nutzbar)"),
+                         self.refresh_library()))
+
+    # -- Monitor-Auswahl mit Vorschau
+    def _monitor_preview(self):
+        """Kleine Karte aller Monitore mit dem jeweiligen Wallpaper-Vorschaubild. -> (Bild, [Rechtecke])"""
+        PW, PH, M = 400, 200, 8
+        img = Image.new("RGB", (PW, PH), (24, 26, 31))
+        mons = get_monitors()
+        if not mons:
+            return img, []
+        l = min(m["rect"][0] for m in mons)
+        t = min(m["rect"][1] for m in mons)
+        r = max(m["rect"][0] + m["rect"][2] for m in mons)
+        b = max(m["rect"][1] + m["rect"][3] for m in mons)
+        sc = min((PW - 2 * M) / max(1, r - l), (PH - 2 * M) / max(1, b - t))
+        ox, oy = (PW - (r - l) * sc) / 2, (PH - (b - t) * sc) / 2
+        assign = self._assign_items()
+        targets = self._target_indices()
+        d = ImageDraw.Draw(img)
+        try:
+            font = ImageFont.truetype("arialbd.ttf", 26)
+        except Exception:
+            font = ImageFont.load_default()
+        rects = []
+        for i, m in enumerate(mons):
+            x, y, w, h = m["rect"]
+            x0, y0 = int(ox + (x - l) * sc), int(oy + (y - t) * sc)
+            x1, y1 = x0 + max(16, int(w * sc)), y0 + max(16, int(h * sc))
+            rects.append((x0, y0, x1, y1))
+            item = assign.get(i)
+            if item:
+                p = THUMB_DIR / f"{item['id']}.jpg"
+                try:
+                    thumb = Image.open(p).convert("RGB") if p.exists() else placeholder()
+                except Exception:
+                    thumb = placeholder()
+                img.paste(ImageOps.fit(thumb, (x1 - x0, y1 - y0)), (x0, y0))
+            else:
+                d.rectangle((x0, y0, x1, y1), fill=(44, 47, 54))
+            chosen = i in targets
+            d.rectangle((x0, y0, x1 - 1, y1 - 1), outline=(76, 194, 255) if chosen else (95, 100, 112),
+                        width=4 if chosen else 2)
+            d.rectangle((x0 + 2, y0 + 2, x0 + 30, y0 + 34), fill=(0, 0, 0))
+            d.text((x0 + 10, y0 + 3), str(i + 1), fill=(255, 255, 255), font=font)
+        return img, rects
+
+    def _refresh_monitor_ui(self):
+        img, rects = self._monitor_preview()
+        self._mon_rects = rects
+        self._mon_img = ctk.CTkImage(img, size=(200, 100))
+        self.mon_preview.configure(image=self._mon_img)
+        mons = get_monitors()
+        sel = str(self.cfg.get("monitor", "all"))
+        single = sel.isdigit() and int(sel) < len(mons)
+        if single:
+            i = int(sel)
+            self.mon_hint.configure(text=f"Ziel: Monitor {i + 1}" + (" (Haupt)" if mons[i]["primary"] else ""))
+            self.btn_stop.configure(text=f"■  Monitor {i + 1} stoppen")
+            self.btn_all.configure(fg_color="gray25", hover_color="gray35", text_color="white")
+        else:
+            self.mon_hint.configure(text="Ziel: Alle Monitore")
+            self.btn_stop.configure(text="■  Wallpaper stoppen")
+            self.btn_all.configure(fg_color=ACCENT, hover_color="#79d2ff", text_color="#06202e")
+
+    def _on_preview_click(self, e):
+        try:
+            ww, hh = max(1, e.widget.winfo_width()), max(1, e.widget.winfo_height())
+            x, y = e.x / ww * 400, e.y / hh * 200
+        except Exception:
+            return
+        for i, (x0, y0, x1, y1) in enumerate(self._mon_rects):
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                self.select_monitor(str(i))
+                return
+
+    def select_monitor(self, sel):
+        self.cfg["monitor"] = sel
+        save_config(self.cfg)
+        self.refresh_library()
+
+    # -- Updates (GitHub)
+    def _auto_check(self):
+        if self.cfg.get("auto_update", True):
+            threading.Thread(target=self._update_worker, args=(False,), daemon=True).start()
+        self.after(6 * 3600 * 1000, self._auto_check)
+
+    def check_updates(self, manual=True):
+        self.set_status("Suche nach Updates …")
+        threading.Thread(target=self._update_worker, args=(manual,), daemon=True).start()
+
+    def _update_worker(self, manual):
+        def say(text, error=False):
+            if manual:
+                self.ui(lambda: self.set_status(text, error))
+
+        repo = (self.cfg.get("update_repo") or GITHUB_REPO).strip()
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo) or repo.startswith("DEIN-"):
+            say("Update-Quelle nicht eingestellt: in wallura.py GITHUB_REPO auf „name/repo“ setzen.", True)
+            return
+        try:
+            info = check_update(repo)
+        except Exception as e:
+            say(f"Update-Suche fehlgeschlagen: {e}", True)
+            return
+        if not info:
+            say(f"Du hast die neueste Version (v{APP_VERSION}).")
+            return
+        self.update_info = info
+        if not getattr(sys, "frozen", False):
+            say(f"Neue Version v{info['version']} verfügbar (Quellcode-Modus: Installer neu bauen).")
+            return
+        if not (manual or self.cfg.get("auto_update", True)):
+            return
+        self.ui(lambda: self.set_status(f"Lade Update v{info['version']} …"))
+        try:
+            path = download_update(info, lambda p: self.ui(lambda: self.progress.set(p / 100)))
+        except Exception as e:
+            msg = f"Update-Download fehlgeschlagen: {e}"
+            self.ui(lambda: (self.set_status(msg, True), self.progress.set(0)))
+            return
+        self.ui(lambda: (self.progress.set(1), self._show_update_bar(info, path)))
+
+    def _show_update_bar(self, info, path):
+        self.update_file = path
+        self.upd_label.configure(text=f"Update v{info['version']} ist bereit.")
+        self.upd_btn.configure(text="Jetzt installieren", command=self.install_update)
+        self.upd_frame.pack(fill="x", padx=8, pady=(0, 6))
+        self.set_status(f"Update v{info['version']} heruntergeladen.")
+        try:
+            if self.state() == "withdrawn":
+                self.tray.notify(f"Update v{info['version']} ist bereit – im Wallura-Fenster installieren.", "Wallura")
+        except Exception:
+            pass
+
+    def install_update(self):
+        path = self.update_file
+        if not path or not Path(path).exists():
+            return
+        self.set_status("Installiere Update – Wallura startet danach neu …")
+        try:
+            subprocess.Popen([str(path), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+                             creationflags=0x00000008 | 0x00000200, close_fds=True)
+        except Exception as e:
+            self.set_status(f"Update-Installer ließ sich nicht starten: {e}", True)
+            return
+        self.after(800, self.quit_app)
+
+    def on_auto_update(self):
+        self.cfg["auto_update"] = bool(self.sw_upd.get())
+        save_config(self.cfg)
+
+    # -- Einstellungen
+    def on_volume(self, v):
+        self.cfg["volume"] = int(v)
+        self.player.set_volume(int(v))
+        save_config(self.cfg)
+
+    def on_fit(self, label):
+        self.cfg["fit"] = FIT_MAP[label]
+        save_config(self.cfg)
+        self.restart_current()
+
+    def on_quality(self, q):
+        self.cfg["quality"] = q
+        save_config(self.cfg)
+        self.set_status("Qualität gilt ab dem nächsten Start / Download.")
+
+    def on_pause_fs(self):
+        self.cfg["pause_fullscreen"] = bool(self.sw_pause.get())
+        save_config(self.cfg)
+
+    def on_autostart(self):
+        on = bool(self.sw_auto.get())
+        try:
+            set_autostart(on)
+            self.cfg["autostart"] = on
+            save_config(self.cfg)
+        except Exception as e:
+            self.set_status(f"Autostart ging nicht: {e}", True)
+
+    def on_install_tools(self):
+        def work():
+            msg = install_tools(lambda s: self.ui(lambda: self.set_status(s)))
+            self.ui(lambda: (self.set_status(msg), self._update_tools_banner()))
+        threading.Thread(target=work, daemon=True).start()
+
+    # -- Status
+    def set_status(self, text, error=False):
+        self.status.configure(text=text, text_color="#ff7b7b" if error else "gray80")
+
+    def _update_tools_banner(self):
+        missing = [n for n in ("mpv", "yt-dlp") if not find_tool(n)]
+        self.banner.configure(text=("Fehlt noch: " + ", ".join(missing) +
+                                    "  →  links auf „Tools installieren“ klicken.") if missing else "")
+
+    # -- Tray
+    def _setup_tray(self):
+        menu = pystray.Menu(
+            pystray.MenuItem("Wallura öffnen", lambda: self.ui(self.show_window), default=True),
+            pystray.MenuItem(lambda item: "Fortsetzen" if self.player.paused_manual else "Pause",
+                             lambda: self.ui(self.toggle_pause)),
+            pystray.MenuItem("Nächstes Wallpaper", lambda: self.ui(self.next_wallpaper)),
+            pystray.MenuItem("Wallpaper stoppen", lambda: self.ui(self.stop_wallpaper)),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Beenden", lambda: self.ui(self.quit_app)),
+        )
+        self.tray = pystray.Icon(APP_NAME, make_icon(), "Wallura", menu)
+        self.tray.run_detached()
+
+    def show_window(self):
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+
+    def hide_to_tray(self):
+        self.withdraw()
+
+    def quit_app(self):
+        self.player.shutdown()
+        try:
+            self.tray.stop()
+        except Exception:
+            pass
+        self.destroy()
+
+
+def main():
+    mutex = win32event.CreateMutex(None, False, "Local\\Wallura_SingleInstance")
+    if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
+        return
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except Exception:
+        pass
+    migrate_autostart()
+    ctk.set_appearance_mode("dark")
+    ctk.set_default_color_theme("blue")
+    app = App(start_hidden="--minimized" in sys.argv)
+    app.mainloop()
+    del mutex
+
+
+if __name__ == "__main__":
+    main()
