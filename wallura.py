@@ -5,6 +5,8 @@ Wallura – Live-Wallpaper-Engine für Windows 10/11
 Quellen : lokale Dateien (mp4, webm, mkv, gif, Bilder ...), Web-Links (direkte Video-Links
           oder alles, was yt-dlp kann) und YouTube-Links.
 Rendering: mpv, eingebettet hinter den Desktop-Icons (Progman/WorkerW-Trick).
+
+Copyright (c) 2026 MorreTv. Alle Rechte vorbehalten.
 """
 import ctypes
 import hashlib
@@ -38,6 +40,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 # ----------------------------------------------------------------------------- Pfade
 APP_NAME = "Wallura"
+COPYRIGHT = "© 2026 MorreTv. Alle Rechte vorbehalten."
 APP_VERSION = "1.1.0"   # wird vom Build / GitHub-Workflow aus dem Release-Tag gesetzt
 # GitHub-Repo für automatische Updates ("benutzername/repo"). Dort muss pro Version ein Release
 # mit der Datei Wallura-Setup.exe liegen (Repo bzw. Releases müssen öffentlich sein).
@@ -913,6 +916,8 @@ class App(ctk.CTk):
         # unten festgepinnt: Stoppen + Hilfs-Aktionen
         foot = ctk.CTkFrame(side, fg_color="transparent")
         foot.pack(side="bottom", fill="x", padx=14, pady=(4, 14))
+        ctk.CTkLabel(foot, text=COPYRIGHT, font=self._font(11), text_color=MUTED,
+                     anchor="center").pack(side="bottom", fill="x", pady=(8, 0))
         self.btn_stop = self._btn(foot, "■  Wallpaper stoppen", self.stop_wallpaper, "danger")
         self.btn_stop.pack(fill="x", pady=(0, 6))
         frow = ctk.CTkFrame(foot, fg_color="transparent")

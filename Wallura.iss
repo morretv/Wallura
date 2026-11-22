@@ -7,7 +7,10 @@
 [Setup]
 AppName=Wallura
 AppVersion={#AppVer}
-AppPublisher=Wallura
+AppPublisher=MorreTv
+AppCopyright=Copyright (C) 2026 MorreTv. Alle Rechte vorbehalten.
+VersionInfoCompanyName=MorreTv
+VersionInfoCopyright=Copyright (C) 2026 MorreTv. Alle Rechte vorbehalten.
 DefaultDirName={autopf}\Wallura
 DefaultGroupName=Wallura
 DisableProgramGroupPage=yes
