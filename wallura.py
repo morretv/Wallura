@@ -6,7 +6,7 @@ Quellen : lokale Dateien (mp4, webm, mkv, gif, Bilder ...), Web-Links (direkte V
           oder alles, was yt-dlp kann) und YouTube-Links.
 Rendering: mpv, eingebettet hinter den Desktop-Icons (Progman/WorkerW-Trick).
 
-Copyright (c) 2026 MorreTv. Alle Rechte vorbehalten.
+Copyright (c) 2026 MorreTv. MIT-Lizenz (siehe LICENSE).
 """
 import ctypes
 import hashlib
@@ -40,7 +40,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 # ----------------------------------------------------------------------------- Pfade
 APP_NAME = "Wallura"
-COPYRIGHT = "© 2026 MorreTv. Alle Rechte vorbehalten."
+COPYRIGHT = "© 2026 MorreTv. Open Source (MIT)"
 APP_VERSION = "1.1.0"   # wird vom Build / GitHub-Workflow aus dem Release-Tag gesetzt
 # GitHub-Repo für automatische Updates ("benutzername/repo"). Dort muss pro Version ein Release
 # mit der Datei Wallura-Setup.exe liegen (Repo bzw. Releases müssen öffentlich sein).

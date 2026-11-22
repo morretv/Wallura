@@ -55,7 +55,7 @@ Updates gibt es nur in der installierten Version (.exe), nicht beim Start aus de
 - YouTube geht nicht mehr: „Tools installieren / aktualisieren“ (yt-dlp-Update).
 - Wallpaper liegt über den Icons oder fehlt (Windows 11 24H2): Das Einbetten in `get_wallpaper_parent()` / `place()` in `wallura.py` ist die empfindlichste Stelle.
 
-## Rechte
+## Lizenz
 
-© 2026 MorreTv. Alle Rechte vorbehalten. Siehe [LICENSE](LICENSE).
+Wallura ist kostenlos und Open Source (MIT-Lizenz), © 2026 MorreTv. Siehe [LICENSE](LICENSE).
 Drittanbieter-Komponenten (customtkinter, pystray, Pillow, pywin32, mpv, yt-dlp) haben ihre eigenen Lizenzen.
