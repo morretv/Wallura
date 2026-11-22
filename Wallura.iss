@@ -33,7 +33,6 @@ Name: "ffmpeg"; Description: "Optional: ffmpeg installieren (bessere Qualität b
 
 [Files]
 Source: "dist\Wallura\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "install_tools.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\Wallura"; Filename: "{app}\Wallura.exe"
@@ -43,7 +42,6 @@ Name: "{autodesktop}\Wallura"; Filename: "{app}\Wallura.exe"; Tasks: desktopicon
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Wallura"; ValueData: """{app}\Wallura.exe"" --minimized"; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\install_tools.ps1"""; StatusMsg: "Installiere mpv und yt-dlp (kann einige Minuten dauern) ..."; Flags: runhidden waituntilterminated; Check: not WizardSilent
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""winget install -e --id Gyan.FFmpeg --silent --accept-source-agreements --accept-package-agreements"""; StatusMsg: "Installiere ffmpeg ..."; Flags: runhidden waituntilterminated; Tasks: ffmpeg
 Filename: "{app}\Wallura.exe"; Description: "Wallura jetzt starten"; Flags: nowait postinstall skipifsilent
 ; Stilles Update aus der App heraus: danach automatisch wieder starten
