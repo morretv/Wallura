@@ -1008,6 +1008,12 @@ class App(ctk.CTk):
         ctk.CTkLabel(mhead, text="Bibliothek", font=self._font(26, "bold"), text_color=TEXT).pack(side="left")
         self.count_lbl = ctk.CTkLabel(mhead, text="", font=self._font(13), text_color=MUTED)
         self.count_lbl.pack(side="left", padx=(12, 0), pady=(8, 0))
+        self._search_job = None
+        self.search_var = ctk.StringVar()
+        self.search_var.trace_add("write", self._on_search)
+        ctk.CTkEntry(mhead, textvariable=self.search_var, placeholder_text="Wallpaper suchen", width=230,
+                     height=34, corner_radius=10, fg_color=SURFACE, border_color=BORDER, text_color=TEXT,
+                     placeholder_text_color=MUTED, font=self._font(13)).pack(side="right", pady=(6, 0))
 
         top = ctk.CTkFrame(main, fg_color="transparent")
         top.grid(row=1, column=0, sticky="we")
@@ -1051,6 +1057,11 @@ class App(ctk.CTk):
             self.after_cancel(self._resize_job)
         self._resize_job = self.after(300, lambda: self._cols() != self._last_cols and self.refresh_library())
 
+    def _on_search(self, *_):
+        if self._search_job:
+            self.after_cancel(self._search_job)
+        self._search_job = self.after(250, self.refresh_library)
+
     def _thumb_image(self, item):
         p = THUMB_DIR / f"{item['id']}.jpg"
         try:
@@ -1073,7 +1084,16 @@ class App(ctk.CTk):
         self._on_map, self._mon_count = on, len(get_monitors())
         cols = self._last_cols = self._cols()
         n_items = len(self.cfg["items"])
-        self.count_lbl.configure(text=f"{n_items} Wallpaper" if n_items else "")
+        q = self.search_var.get().strip().lower()
+        shown = [it for it in self.cfg["items"] if q in str(it.get("title", "")).lower()] if q else self.cfg["items"]
+        if not n_items:
+            self.count_lbl.configure(text="")
+        else:
+            self.count_lbl.configure(text=f"{len(shown)} von {n_items}" if q else f"{n_items} Wallpaper")
+        if n_items and not shown:
+            ctk.CTkLabel(self.scroll, text=f"Keine Treffer für „{q}“.", font=self._font(14),
+                         text_color=MUTED).grid(row=0, column=0, padx=20, pady=40)
+            return
         if not n_items:
             box = ctk.CTkFrame(self.scroll, corner_radius=16, fg_color=SURFACE, border_width=1, border_color=BORDER)
             box.grid(row=0, column=0, padx=8, pady=24)
@@ -1086,13 +1106,13 @@ class App(ctk.CTk):
             self._btn(brow, "＋  Datei hinzufügen", self.add_local, "primary", width=170).pack(side="left", padx=4)
             self._btn(brow, "＋  Link", self.add_link, "secondary", width=110).pack(side="left", padx=4)
             return
-        for n, item in enumerate(self.cfg["items"]):
+        for n, item in enumerate(shown):
             self._card(item, n // cols, n % cols)
 
     def _card(self, item, r, c):
         on = sorted(self._on_map.get(item["id"], []))
         active = bool(on) and self.player.active
-        card = ctk.CTkFrame(self.scroll, corner_radius=14, fg_color=SURFACE,
+        card = ctk.CTkFrame(self.scroll, corner_radius=14, fg_color="#14232c" if active else SURFACE,
                             border_width=2 if active else 1, border_color=ACCENT if active else BORDER)
         card.grid(row=r, column=c, padx=8, pady=8, sticky="n")
         lbl = ctk.CTkLabel(card, image=self._thumb_image(item), text="", cursor="hand2")
