@@ -34,8 +34,14 @@ Name: "desktopicon"; Description: "Desktop-Verknüpfung erstellen"
 Name: "autostart"; Description: "Wallura mit Windows starten"
 Name: "ffmpeg"; Description: "Optional: ffmpeg installieren (bessere Qualität beim Herunterladen, ca. 100 MB)"; Flags: unchecked
 
+#if !FileExists(SourcePath + "tools\mpv.exe") || !FileExists(SourcePath + "tools\yt-dlp.exe")
+  #error "tools\\mpv.exe / tools\\yt-dlp.exe fehlen - erst 'python fetch_tools.py' ausführen (macht build_installer.bat automatisch)."
+#endif
+
 [Files]
 Source: "dist\Wallura\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; mpv + yt-dlp liegen fertig im Installer (Wallura findet sie in {app}\tools)
+Source: "tools\*"; DestDir: "{app}\tools"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\Wallura"; Filename: "{app}\Wallura.exe"

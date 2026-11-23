@@ -32,6 +32,12 @@ jobs:
           python make_icon.py
           python -m PyInstaller --noconfirm --clean --onedir --windowed --name Wallura --icon wallura.ico --collect-all customtkinter --hidden-import pystray._win32 wallura.py
 
+      - name: Tools (mpv, yt-dlp) laden
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python fetch_tools.py
+
       - name: Inno Setup installieren
         run: choco install innosetup -y --no-progress
 

@@ -11,6 +11,13 @@
 
 Optional: `ffmpeg` (`winget install Gyan.FFmpeg`) für Downloads in voller Qualität.
 
+## Installer bauen
+
+`build_installer.bat` ausführen → `installer\Wallura-Setup.exe`. Dabei lädt `fetch_tools.py` automatisch
+`mpv.exe` und `yt-dlp.exe` nach `tools\`, und der Installer legt sie mit ins Programmverzeichnis
+(`{app}\tools`). Wer Wallura per Setup installiert, muss also keine Tools mehr nachinstallieren.
+„Tools installieren / aktualisieren“ in der App bleibt für yt-dlp-Updates nützlich.
+
 ## Als .exe bauen
 
 `build_exe.bat` ausführen → `dist\Wallura.exe`.
@@ -38,7 +45,7 @@ Optional: `ffmpeg` (`winget install Gyan.FFmpeg`) für Downloads in voller Quali
 2. Neue Version: `APP_VERSION` erhöhen, `build_installer.bat` ausführen und `installer\Wallura-Setup.exe`
    als Datei an ein **GitHub-Release** hängen (Tag z. B. `v1.2.0`).
    Oder automatisch: Tag pushen (`git tag v1.2.0 && git push origin v1.2.0`) – `.github/workflows/release.yml`
-   baut den Installer und legt das Release an (braucht `requirements.txt` im Repo).
+   lädt die Tools, baut den Installer und legt das Release an (braucht `requirements.txt` und `fetch_tools.py` im Repo).
 3. Wallura prüft beim Start und danach alle 6 Stunden, lädt das Update (bei aktivem Schalter
    „Updates automatisch laden“) herunter und zeigt oben **„Jetzt installieren“**. Der Installer läuft still
    und startet Wallura danach neu. „Nach Updates suchen“ prüft sofort.
