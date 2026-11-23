@@ -90,6 +90,8 @@ YT_ID_RE = re.compile(r"(?:v=|youtu\.be/|/shorts/|/embed/|/live/)([A-Za-z0-9_-]{
 
 FIT_MAP = {"Füllen (zuschneiden)": "cover", "Einpassen (Balken)": "contain", "Strecken": "stretch"}
 QUALITIES = ["720", "1080", "1440", "2160"]
+FPS_MAP = {"Original": 0, "60 FPS": 60, "30 FPS": 30}
+BELOW_NORMAL_PRIORITY = 0x00004000
 KIND_LABEL = {"local": "Lokal", "youtube": "YouTube", "web": "Web"}
 
 DEFAULTS = {
@@ -100,6 +102,7 @@ DEFAULTS = {
     "fit": "cover",
     "monitor": "all",
     "quality": "1080",
+    "fps_limit": 30,
     "pause_fullscreen": True,
     "autostart": False,
     "auto_update": True,
@@ -437,6 +440,34 @@ def embed(hwnd, rect):
     win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex)
     win32gui.SetParent(hwnd, parent)
     place(hwnd, rect, parent, progman_mode)
+    if win32gui.GetParent(hwnd) != parent:
+        raise RuntimeError("SetParent hat nicht gegriffen")
+    return parent
+
+
+def wait_for_shell(timeout=120):
+    """Wartet, bis Explorer / Desktop bereit sind (wichtig beim Autostart direkt nach dem Windows-Start)."""
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            progman = win32gui.FindWindow("Progman", None)
+            if progman and win32gui.FindWindow("Shell_TrayWnd", None):
+                if win32gui.FindWindowEx(progman, 0, "SHELLDLL_DefView", None):
+                    return True
+                found = []
+
+                def cb(h, _):
+                    if win32gui.FindWindowEx(h, 0, "SHELLDLL_DefView", None):
+                        found.append(h)
+                    return True
+
+                win32gui.EnumWindows(cb, None)
+                if found:
+                    return True
+        except Exception:
+            pass
+        time.sleep(1)
+    return False
 
 
 def place(hwnd, rect, parent=None, progman_mode=None):
@@ -472,6 +503,50 @@ def fullscreen_app_active():
         return l <= ml and t <= mt and r >= mr and b >= mb
     except Exception:
         return False
+
+
+def covered_monitor_rects():
+    """Monitore, die gerade von einem maximierten Fenster im Vordergrund verdeckt werden."""
+    try:
+        hwnd = win32gui.GetForegroundWindow()
+        if (not hwnd or not win32gui.IsWindowVisible(hwnd) or win32gui.IsIconic(hwnd)
+                or win32gui.GetClassName(hwnd) in _SKIP_CLASSES or not win32gui.IsZoomed(hwnd)):
+            return set()
+        l, t, r, b = win32api.GetMonitorInfo(
+            win32api.MonitorFromWindow(hwnd, win32con.MONITOR_DEFAULTTONEAREST))["Monitor"]
+        return {(l, t, r - l, b - t)}
+    except Exception:
+        return set()
+
+
+# Begrenzt die Bildrate nur bei Videos, die schneller sind als das Limit (kein Ruckeln bei 24/30 fps)
+FPS_LUA = """local limit = tonumber(mp.get_opt("wallura-fps")) or 0
+local capped = false
+mp.observe_property("container-fps", "number", function(_, fps)
+    if limit <= 0 or not fps then return end
+    if fps > limit + 1 then
+        if not capped then
+            capped = true
+            mp.set_property("hwdec", "auto-copy-safe")
+        end
+        mp.commandv("vf", "set", "fps=" .. limit)
+    elseif capped then
+        capped = false
+        mp.commandv("vf", "clr", "")
+        mp.set_property("hwdec", "auto-safe")
+    end
+end)
+"""
+
+
+def fps_script():
+    path = DATA_DIR / "fps_limit.lua"
+    try:
+        if not path.exists() or path.read_text(encoding="utf-8") != FPS_LUA:
+            path.write_text(FPS_LUA, encoding="utf-8")
+    except OSError:
+        return None
+    return str(path).replace("\\", "/")
 
 
 # ----------------------------------------------------------------------------- Player
@@ -520,11 +595,18 @@ class Player:
         base = [mpv, "--no-config", "--force-window=immediate", "--no-border", "--no-osc", "--osd-level=0",
                 "--no-input-default-bindings", "--window-dragging=no", "--input-cursor=no", "--loop-file=inf", "--keep-open=yes",
                 "--image-display-duration=inf", "--stop-screensaver=no", "--hwdec=auto-safe",
-                "--audio-display=no", f"--volume={vol}", f"--mute={'yes' if vol == 0 else 'no'}",
+                "--audio-display=no", "--scale=bilinear", "--cscale=bilinear", "--dscale=bilinear", "--dither=no",
+                "--correct-downscaling=no", "--interpolation=no", "--deband=no", "--video-sync=audio",
+                "--framedrop=vo", "--sub-auto=no", "--sid=no", "--demuxer-max-bytes=64MiB",
+                "--demuxer-max-back-bytes=16MiB", f"--volume={vol}", f"--mute={'yes' if vol == 0 else 'no'}",
                 "--ytdl=yes", f"--ytdl-format=bv*[height<=?{q}]+ba/b[height<=?{q}]/b",
                 "--ytdl-raw-options=no-playlist=", "--no-terminal", "--msg-level=all=warn"]
         if ytdlp:
             base.append("--script-opts=ytdl_hook-ytdl_path=" + ytdlp.replace("\\", "/"))
+        fps_limit = int(self.cfg.get("fps_limit", 30) or 0)
+        script = fps_script() if fps_limit else None
+        if script:
+            base += [f"--script={script}", f"--script-opts-append=wallura-fps={fps_limit}"]
         if fit == "cover":
             base.append("--panscan=1.0")
         elif fit == "stretch":
@@ -594,6 +676,7 @@ class Player:
                 self._paused = False
             return True
 
+        wait_for_shell(60)
         mpv = find_tool("mpv")
         if not mpv:
             self.on_error("mpv fehlt – bitte links auf „Tools installieren“ klicken.")
@@ -619,7 +702,7 @@ class Player:
             cmd = base + [f"--title=Wallura-{os.getpid()}-{idx}", f"--input-ipc-server={pipe}",
                           f"--log-file={log}", src]
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                    creationflags=CREATE_NO_WINDOW)
+                                    creationflags=CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY)
             self._add_to_job(proc)
             new[idx] = {"proc": proc, "pipe": pipe, "rect": mons[idx]["rect"], "hwnd": None, "log": log, "item": item}
 
@@ -637,11 +720,18 @@ class Player:
                 ok = False
                 continue
             inst["hwnd"] = hwnd
-            try:
-                embed(hwnd, inst["rect"])
-            except Exception as e:
+            err = None
+            for _attempt in range(6):
+                try:
+                    inst["parent"] = embed(hwnd, inst["rect"])
+                    err = None
+                    break
+                except Exception as e:
+                    err = e
+                    time.sleep(1.0)
+            if err is not None:
                 self._kill(inst)
-                self.on_error(f"Einbetten in den Desktop fehlgeschlagen: {e}")
+                self.on_error(f"Einbetten in den Desktop fehlgeschlagen: {err}")
                 ok = False
                 continue
             with self.lock:
@@ -693,6 +783,7 @@ class Player:
     def _apply_pause(self, paused):
         self._paused = paused
         for inst in list(self.instances.values()):
+            inst["cover_paused"] = False
             self._ipc(inst, ["set_property", "pause", paused])
 
     # -- Überwachung: Auto-Pause, Neustart nach Crash, Position halten
@@ -718,11 +809,23 @@ class Player:
             want = self.paused_manual or (self.cfg.get("pause_fullscreen", True) and fullscreen_app_active())
             if want != self._paused:
                 self._apply_pause(want)
-            if self._tick % 5 == 0:
+            covered = covered_monitor_rects() if (self.cfg.get("pause_fullscreen", True) and not self._paused) else set()
+            for inst in alive:
+                should = inst["rect"] in covered
+                if should != inst.get("cover_paused", False):
+                    inst["cover_paused"] = should
+                    self._ipc(inst, ["set_property", "pause", should])
+            if self._tick % 2 == 0:
                 for inst in alive:
                     try:
                         hwnd = inst["hwnd"]
                         if not win32gui.IsWindow(hwnd):
+                            continue
+                        parent = inst.get("parent")
+                        is_child = bool(win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE) & win32con.WS_CHILD)
+                        if (not parent or not win32gui.IsWindow(parent)
+                                or win32gui.GetParent(hwnd) != parent or not is_child):
+                            inst["parent"] = embed(hwnd, inst["rect"])  # war nach vorne gerutscht -> zurück hinter die Icons
                             continue
                         l, t, r, b = win32gui.GetWindowRect(hwnd)
                         x, y, w, h = inst["rect"]
@@ -806,12 +909,18 @@ class App(ctk.CTk):
         if start_hidden:
             self.withdraw()
         if self._assign_items():
-            threading.Thread(target=self._startup_worker, daemon=True).start()
+            threading.Thread(target=self._startup_worker, args=(start_hidden,), daemon=True).start()
         cleanup_old_updates()
         self.after(20000, self._auto_check)
 
-    def _startup_worker(self):
-        self.player.apply(self._assign_items())
+    def _startup_worker(self, boot=False):
+        if boot:  # Start mit Windows: Explorer braucht einen Moment, bis der Desktop wirklich bereit ist
+            wait_for_shell(120)
+            time.sleep(3)
+        for attempt in range(4 if boot else 1):
+            if self.player.apply(self._assign_items()):
+                break
+            time.sleep(10)
         self.ui(self.refresh_library)
 
     def _migrate_config(self):
@@ -983,6 +1092,12 @@ class App(ctk.CTk):
         self.fit_menu.set(next(k for k, v in FIT_MAP.items() if v == self.cfg["fit"]))
         self.fit_menu.pack(fill="x", padx=14, pady=(4, 12))
 
+        ctk.CTkLabel(play, text="Max. FPS (spart Leistung)", font=self._font(13), text_color=TEXT,
+                     anchor="w").pack(fill="x", padx=14)
+        self.fps_menu = ctk.CTkOptionMenu(play, values=list(FPS_MAP), command=self.on_fps, **self._menu_style())
+        self.fps_menu.set(next((k for k, v in FPS_MAP.items() if v == self.cfg.get("fps_limit", 30)), "30 FPS"))
+        self.fps_menu.pack(fill="x", padx=14, pady=(4, 12))
+
         ctk.CTkLabel(play, text="Max. Qualität (Streams, p)", font=self._font(13), text_color=TEXT,
                      anchor="w").pack(fill="x", padx=14)
         self.q_menu = ctk.CTkOptionMenu(play, values=QUALITIES, command=self.on_quality, **self._menu_style())
@@ -991,7 +1106,7 @@ class App(ctk.CTk):
 
         # --- System
         sysp = self._panel(body, "System")
-        self.sw_pause = self._switch(sysp, "Pause bei Vollbild-Apps", self.on_pause_fs)
+        self.sw_pause = self._switch(sysp, "Pause wenn Desktop verdeckt", self.on_pause_fs)
         if self.cfg["pause_fullscreen"]:
             self.sw_pause.select()
         self.sw_auto = self._switch(sysp, "Mit Windows starten", self.on_autostart)
@@ -1499,6 +1614,11 @@ class App(ctk.CTk):
 
     def on_fit(self, label):
         self.cfg["fit"] = FIT_MAP[label]
+        save_config(self.cfg)
+        self.restart_current()
+
+    def on_fps(self, label):
+        self.cfg["fps_limit"] = FPS_MAP[label]
         save_config(self.cfg)
         self.restart_current()
 
