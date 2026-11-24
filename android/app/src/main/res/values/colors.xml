@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#0d0f13</color>
+    <color name="surface">#15181e</color>
+    <color name="surface2">#1c2028</color>
+    <color name="border">#2a303a</color>
+    <color name="accent">#4cc2ff</color>
+    <color name="accent_dim">#2d7fa8</color>
+    <color name="accent_hover">#79d2ff</color>
+    <color name="text">#e9edf2</color>
+    <color name="muted">#8a93a2</color>
+    <color name="on_accent">#06202e</color>
+    <color name="status_ok">#c3cad5</color>
+    <color name="status_err">#ff7b7b</color>
+    <color name="danger_text">#ff8a8e</color>
+    <color name="danger_border">#5a2a2e</color>
+    <color name="thumb_bg">#0b0d10</color>
+</resources>

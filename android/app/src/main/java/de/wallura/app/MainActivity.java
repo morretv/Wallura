@@ -1,16 +1,20 @@
 package de.wallura.app;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.WallpaperManager;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.view.LayoutInflater;
 import android.view.View;
-import android.widget.Button;
-import android.widget.CheckBox;
+import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.SeekBar;
 import android.widget.TextView;
 
 import java.io.File;
@@ -20,43 +24,180 @@ import java.io.OutputStream;
 import java.util.List;
 import java.util.Locale;
 
-/** Videobibliothek und Einrichtung des Live-Wallpapers. */
+/** Bibliothek, Einstellungen und Wiedergabe – Aufbau und Farben wie am PC. */
 public class MainActivity extends Activity {
 
     private static final int REQ_PICK = 1001;
 
     private TextView status;
+    private TextView count;
+    private EditText search;
     private LinearLayout list;
-    private CheckBox mute;
+    private LinearLayout settings;
+    private TextView sideActive;
+    private SeekBar volume;
+    private TextView volumeLabel;
+    private TextView navLibrary;
+    private TextView navSettings;
+    private TextView btnPause;
+    private TextView storageDesc;
+    private View pageLibrary;
+    private View pageSettings;
+
+    private String version = "";
+    private boolean paused;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        version = versionName();
+
         status = findViewById(R.id.status);
-        list = findViewById(R.id.list);
-        mute = findViewById(R.id.mute);
-        mute.setChecked(Library.muted(this));
-        mute.setOnCheckedChangeListener((v, checked) -> {
-            Library.setMuted(this, checked);
-            broadcastRefresh();
+        count = findViewById(R.id.lib_count);
+        search = findViewById(R.id.lib_search);
+        list = findViewById(R.id.lib_list);
+        settings = findViewById(R.id.settings_container);
+        sideActive = findViewById(R.id.side_active);
+        volume = findViewById(R.id.volume);
+        volumeLabel = findViewById(R.id.volume_lbl);
+        navLibrary = findViewById(R.id.nav_library);
+        navSettings = findViewById(R.id.nav_settings);
+        btnPause = findViewById(R.id.btn_pause);
+        pageLibrary = findViewById(R.id.page_library);
+        pageSettings = findViewById(R.id.page_settings);
+
+        ((TextView) findViewById(R.id.side_version)).setText("Version " + version);
+
+        navLibrary.setOnClickListener(v -> showPage("library"));
+        navSettings.setOnClickListener(v -> showPage("settings"));
+        findViewById(R.id.side_set).setOnClickListener(v -> setAsWallpaper());
+        findViewById(R.id.btn_add).setOnClickListener(v -> pickVideo());
+        findViewById(R.id.btn_next).setOnClickListener(v -> nextWallpaper());
+        findViewById(R.id.btn_stop).setOnClickListener(v -> {
+            paused = false;
+            btnPause.setText("Pause");
+            sendCommand(VideoWallpaperService.CMD_STOP);
+            refresh();
+            setStatus("Gestoppt – „Nächstes“ oder ein Video wählen, um weiterzuspielen.");
+        });
+        btnPause.setOnClickListener(v -> {
+            paused = !paused;
+            sendCommand(paused ? VideoWallpaperService.CMD_PAUSE : VideoWallpaperService.CMD_RESUME);
+            btnPause.setText(paused ? "Fortsetzen" : "Pause");
+            setStatus(paused ? "Pausiert." : "Wallpaper läuft.");
         });
 
-        findViewById(R.id.add).setOnClickListener(v -> pickVideo());
-        findViewById(R.id.set).setOnClickListener(v -> setAsWallpaper());
+        search.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+            }
 
-        TextView version = findViewById(R.id.version);
-        version.setText("Version " + versionName());
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+                refresh();
+            }
 
+            @Override
+            public void afterTextChanged(Editable s) {
+            }
+        });
+
+        volume.setMax(100);
+        volume.setProgress(Library.volume(this));
+        volumeLabel.setText(Library.volume(this) + " %");
+        volume.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar bar, int value, boolean fromUser) {
+                volumeLabel.setText(value + " %");
+                if (!fromUser) {
+                    return;
+                }
+                Library.setVolume(MainActivity.this, value);
+                sendCommand(VideoWallpaperService.CMD_VOLUME);
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar bar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar bar) {
+            }
+        });
+
+        buildSettings();
+        showPage("library");
         refresh();
+        setStatus(Library.videos(this).isEmpty()
+                ? "Noch keine Videos – tippe auf „＋ Datei“." : "Bereit.");
     }
 
-    private String versionName() {
-        try {
-            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
-        } catch (Exception e) {
-            return "";
+    // ---------------------------------------------------------------- Bibliothek
+
+    private void refresh() {
+        List<File> filtered = Library.videos(this, search.getText().toString());
+        int total = Library.videos(this).size();
+        count.setText(total == 1 ? "1 Wallpaper" : total + " Wallpaper");
+
+        File active = Library.activeFile(this);
+        String activePath = active == null ? null : active.getAbsolutePath();
+        sideActive.setText(active == null ? "Keins gewählt" : active.getName());
+
+        updateStorageText();
+
+        list.removeAllViews();
+        if (filtered.isEmpty()) {
+            String hint = total == 0
+                    ? "Noch keine Videos. Tippe auf „＋ Datei“ und wähle ein Video von deinem Handy."
+                    : "Kein Treffer für „" + search.getText().toString().trim() + "“.";
+            TextView empty = Ui.text(this, hint, 11, Ui.col(this, R.color.muted), false);
+            empty.setPadding(0, Ui.dp(this, 12), 0, Ui.dp(this, 12));
+            list.addView(empty);
+            return;
+        }
+
+        LayoutInflater inflater = LayoutInflater.from(this);
+        for (final File file : filtered) {
+            final String path = file.getAbsolutePath();
+            final boolean isActive = path.equals(activePath);
+            View row = inflater.inflate(R.layout.item_video, list, false);
+
+            ((TextView) row.findViewById(R.id.video_name)).setText(file.getName());
+            ((TextView) row.findViewById(R.id.video_meta)).setText(
+                    String.format(Locale.GERMANY, "%.1f MB", file.length() / (1024.0 * 1024.0))
+                            + (isActive ? "  ·  aktiv" : ""));
+            Thumbs.load(this, file, (ImageView) row.findViewById(R.id.video_thumb));
+
+            final TextView pick = row.findViewById(R.id.video_pick);
+            pick.setText(isActive ? "Aktiv" : "Auswählen");
+            pick.setTextColor(Ui.col(this, isActive ? R.color.muted : R.color.on_accent));
+            pick.setBackgroundResource(isActive ? R.drawable.bg_btn_ghost : R.drawable.bg_btn_primary);
+            pick.setOnClickListener(v -> {
+                Library.setActive(this, path);
+                paused = false;
+                btnPause.setText("Pause");
+                sendCommand(VideoWallpaperService.CMD_RELOAD);
+                refresh();
+                setStatus("Wallpaper: " + file.getName());
+            });
+
+            row.findViewById(R.id.video_delete).setOnClickListener(v -> {
+                if (!file.delete()) {
+                    setStatus("Video ließ sich nicht löschen.", true);
+                    return;
+                }
+                Thumbs.remove(this, file);
+                if (path.equals(Library.active(this))) {
+                    Library.setActive(this, null);
+                }
+                sendCommand(VideoWallpaperService.CMD_RELOAD);
+                refresh();
+                setStatus("Video gelöscht.");
+            });
+
+            list.addView(row);
         }
     }
 
@@ -68,7 +209,7 @@ public class MainActivity extends Activity {
         try {
             startActivityForResult(intent, REQ_PICK);
         } catch (Exception e) {
-            status.setText("Keine App zum Auswählen gefunden: " + e.getMessage());
+            setStatus("Keine App zum Auswählen gefunden: " + e.getMessage(), true);
         }
     }
 
@@ -80,11 +221,11 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Kopiert das gewählte Video in den App-Ordner – so bleibt es auch ohne Dateizugriff nutzbar. */
+    /** Kopiert das gewählte Video in den App-Ordner – so bleibt es dauerhaft nutzbar. */
     private void importVideo(final Uri uri) {
-        status.setText("Video wird übernommen …");
+        setStatus("Video wird übernommen …");
         new Thread(() -> {
-            File dest = new File(Library.dir(this), System.currentTimeMillis() + ".mp4");
+            final File dest = new File(Library.dir(this), System.currentTimeMillis() + ".mp4");
             try (InputStream in = getContentResolver().openInputStream(uri);
                  OutputStream out = new FileOutputStream(dest)) {
                 if (in == null) {
@@ -97,24 +238,51 @@ public class MainActivity extends Activity {
                 }
             } catch (Exception e) {
                 dest.delete();
-                runOnUiThread(() -> status.setText("Import fehlgeschlagen: " + e.getMessage()));
+                runOnUiThread(() -> setStatus("Import fehlgeschlagen: " + e.getMessage(), true));
                 return;
             }
             runOnUiThread(() -> {
                 Library.setActive(this, dest.getAbsolutePath());
-                broadcastRefresh();
+                paused = false;
+                btnPause.setText("Pause");
+                sendCommand(VideoWallpaperService.CMD_RELOAD);
                 refresh();
-                status.setText("Video übernommen – oben auf „Als Live-Wallpaper setzen“ tippen.");
+                setStatus("Video übernommen – jetzt „Als Live-Wallpaper setzen“.");
             });
         }).start();
     }
 
-    private void setAsWallpaper() {
-        if (Library.videos(this).isEmpty()) {
-            status.setText("Erst ein Video hinzufügen.");
+    private void nextWallpaper() {
+        List<File> videos = Library.videos(this);
+        if (videos.isEmpty()) {
+            setStatus("Erst ein Video hinzufügen.");
             return;
         }
-        broadcastRefresh();
+        File active = Library.activeFile(this);
+        int index = 0;
+        if (active != null) {
+            for (int i = 0; i < videos.size(); i++) {
+                if (videos.get(i).getAbsolutePath().equals(active.getAbsolutePath())) {
+                    index = (i + 1) % videos.size();
+                    break;
+                }
+            }
+        }
+        File next = videos.get(index);
+        Library.setActive(this, next.getAbsolutePath());
+        paused = false;
+        btnPause.setText("Pause");
+        sendCommand(VideoWallpaperService.CMD_RELOAD);
+        refresh();
+        setStatus("Wallpaper läuft: " + next.getName());
+    }
+
+    private void setAsWallpaper() {
+        if (Library.videos(this).isEmpty()) {
+            setStatus("Erst ein Video hinzufügen.");
+            return;
+        }
+        sendCommand(VideoWallpaperService.CMD_RESUME);
         ComponentName service = new ComponentName(this, VideoWallpaperService.class);
         Intent direct = new Intent(WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER);
         direct.putExtra(WallpaperManager.EXTRA_LIVE_WALLPAPER_COMPONENT, service);
@@ -124,68 +292,163 @@ public class MainActivity extends Activity {
             try {
                 startActivity(new Intent(WallpaperManager.ACTION_LIVE_WALLPAPER_CHOOSER));
             } catch (Exception e2) {
-                status.setText("Live-Wallpaper-Auswahl nicht verfügbar: " + e2.getMessage());
+                setStatus("Live-Wallpaper-Auswahl nicht verfügbar: " + e2.getMessage(), true);
             }
         }
     }
 
-    private void broadcastRefresh() {
-        sendBroadcast(new Intent(VideoWallpaperService.ACTION_REFRESH).setPackage(getPackageName()));
+    // ---------------------------------------------------------------- Einstellungen
+
+    private void buildSettings() {
+        settings.removeAllViews();
+
+        LinearLayout play = Ui.section(this, settings, "Wiedergabe");
+        Ui.block(this, play, "Anpassung",
+                "Füllen schneidet zu, Einpassen zeigt Balken, Strecken verzerrt.");
+        LinearLayout chips = new LinearLayout(this);
+        chips.setOrientation(LinearLayout.HORIZONTAL);
+        String[] labels = {"Füllen", "Einpassen", "Strecken"};
+        String[] values = {Library.FIT_COVER, Library.FIT_CONTAIN, Library.FIT_STRETCH};
+        String current = Library.fit(this);
+        for (int i = 0; i < labels.length; i++) {
+            final String value = values[i];
+            TextView chip = Ui.pill(this, labels[i],
+                    value.equals(current) ? Ui.CHIP_ON : Ui.CHIP_OFF);
+            chip.setOnClickListener(v -> {
+                Library.setFit(this, value);
+                sendCommand(VideoWallpaperService.CMD_RELOAD);
+                buildSettings();
+                setStatus("Anpassung: " + value);
+            });
+            LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            if (i > 0) {
+                chipParams.leftMargin = Ui.dp(this, 5);
+            }
+            chips.addView(chip, chipParams);
+        }
+        LinearLayout.LayoutParams chipsParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        chipsParams.bottomMargin = Ui.dp(this, 6);
+        play.addView(chips, chipsParams);
+        Ui.block(this, play, "Lautstärke", "Ton des Wallpapers – 0 % ist stumm (unten in der Leiste).");
+
+        LinearLayout wall = Ui.section(this, settings, "Wallpaper");
+        LinearLayout wallRow = Ui.block(this, wall, "Live-Wallpaper",
+                "Wallura als Live-Wallpaper im System einrichten.");
+        TextView set = Ui.pill(this, "Setzen", Ui.PRIMARY);
+        set.setOnClickListener(v -> setAsWallpaper());
+        wallRow.addView(set);
+
+        LinearLayout updates = Ui.section(this, settings, "Updates");
+        LinearLayout updateRow = Ui.block(this, updates, "Wallura " + version,
+                "Sucht bei GitHub nach einer neuen Version.");
+        TextView check = Ui.pill(this, "Nach Updates suchen", Ui.SECONDARY);
+        check.setOnClickListener(v -> checkUpdates());
+        updateRow.addView(check);
+
+        LinearLayout storage = Ui.section(this, settings, "Speicher");
+        LinearLayout storageRow = Ui.block(this, storage, "Videos", "…");
+        storageDesc = (TextView) storageRow.getTag();
+        TextView clear = Ui.pill(this, "Alle löschen", Ui.DANGER);
+        clear.setOnClickListener(v -> confirmDeleteAll());
+        storageRow.addView(clear);
+
+        LinearLayout about = Ui.section(this, settings, "Über");
+        Ui.block(this, about, "Wallura " + version,
+                "Video-Live-Wallpaper für Android. © 2026 MorreTv. Open Source (MIT).");
+
+        updateStorageText();
     }
 
-    private void refresh() {
-        list.removeAllViews();
-        List<File> videos = Library.videos(this);
-        if (videos.isEmpty()) {
-            addHint("Noch keine Videos. Tippe auf „Video hinzufügen“ und wähle ein Video von deinem Handy.");
+    private void updateStorageText() {
+        if (storageDesc == null) {
             return;
         }
-        String active = Library.active(this);
-        LayoutInflater inflater = LayoutInflater.from(this);
-        for (final File file : videos) {
-            final String path = file.getAbsolutePath();
-            final boolean isActive = path.equals(active);
-            View row = inflater.inflate(R.layout.item_video, list, false);
+        int total = Library.videos(this).size();
+        float mb = Library.totalBytes(this) / (1024f * 1024f);
+        String size = String.format(Locale.GERMANY, "%.1f MB", mb);
+        storageDesc.setText((total == 1 ? "1 Video · " : total + " Videos · ") + size);
+    }
 
-            TextView name = row.findViewById(R.id.video_name);
-            name.setText(file.getName());
-            TextView meta = row.findViewById(R.id.video_meta);
-            meta.setText(String.format(Locale.GERMANY, "%.1f MB", file.length() / (1024.0 * 1024.0))
-                    + (isActive ? "  ·  aktiv" : ""));
+    private void confirmDeleteAll() {
+        new AlertDialog.Builder(this)
+                .setTitle("Alle Videos löschen?")
+                .setMessage("Die importierten Videos werden aus Wallura entfernt. "
+                        + "Die Originale auf dem Handy bleiben erhalten.")
+                .setNegativeButton("Abbrechen", null)
+                .setPositiveButton("Löschen", (dialog, which) -> {
+                    Library.deleteAll(this);
+                    sendCommand(VideoWallpaperService.CMD_STOP);
+                    paused = false;
+                    btnPause.setText("Pause");
+                    refresh();
+                    setStatus("Alle Videos gelöscht.");
+                })
+                .show();
+    }
 
-            Button pick = row.findViewById(R.id.video_pick);
-            pick.setText(isActive ? "Aktiv" : "Auswählen");
-            pick.setEnabled(!isActive);
-            pick.setOnClickListener(v -> {
-                Library.setActive(this, path);
-                broadcastRefresh();
-                refresh();
-                status.setText("Video ausgewählt – oben auf „Als Live-Wallpaper setzen“ tippen.");
-            });
+    private void checkUpdates() {
+        setStatus("Suche nach Updates …");
+        Updater.check((tag, apkUrl, error) -> {
+            if (error != null) {
+                setStatus("Update-Suche fehlgeschlagen: " + error, true);
+                return;
+            }
+            if (tag == null || tag.isEmpty()) {
+                setStatus("Keine Release-Information gefunden.", true);
+                return;
+            }
+            if (!Updater.isNewer(tag, version)) {
+                setStatus("Wallura " + version + " ist aktuell.");
+                return;
+            }
+            setStatus("Update " + tag + " ist verfügbar – Download startet im Browser.");
+            openUrl(apkUrl == null || apkUrl.isEmpty()
+                    ? "https://github.com/morretv/Wallura/releases/latest" : apkUrl);
+        });
+    }
 
-            row.findViewById(R.id.video_delete).setOnClickListener(v -> {
-                if (!file.delete()) {
-                    status.setText("Video ließ sich nicht löschen.");
-                    return;
-                }
-                if (path.equals(Library.active(this))) {
-                    Library.setActive(this, null);
-                }
-                broadcastRefresh();
-                refresh();
-                status.setText("Video gelöscht.");
-            });
-
-            list.addView(row);
+    private void openUrl(String url) {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        } catch (Exception e) {
+            setStatus("Link ließ sich nicht öffnen: " + e.getMessage(), true);
         }
     }
 
-    private void addHint(String text) {
-        TextView hint = new TextView(this);
-        hint.setText(text);
-        hint.setTextColor(0xFF9AA7B2);
-        hint.setTextSize(14);
-        hint.setPadding(0, 12, 0, 12);
-        list.addView(hint);
+    // ---------------------------------------------------------------- Hilfen
+
+    private void showPage(String name) {
+        boolean library = "library".equals(name);
+        pageLibrary.setVisibility(library ? View.VISIBLE : View.GONE);
+        pageSettings.setVisibility(library ? View.GONE : View.VISIBLE);
+        navLibrary.setBackgroundResource(library ? R.drawable.bg_nav_on : R.drawable.bg_nav_off);
+        navSettings.setBackgroundResource(library ? R.drawable.bg_nav_off : R.drawable.bg_nav_on);
+        navLibrary.setTextColor(Ui.col(this, library ? R.color.text : R.color.muted));
+        navSettings.setTextColor(Ui.col(this, library ? R.color.muted : R.color.text));
+    }
+
+    private void sendCommand(String cmd) {
+        Intent intent = new Intent(VideoWallpaperService.ACTION_COMMAND).setPackage(getPackageName());
+        intent.putExtra(VideoWallpaperService.EXTRA_CMD, cmd);
+        sendBroadcast(intent);
+    }
+
+    private void setStatus(String text) {
+        setStatus(text, false);
+    }
+
+    private void setStatus(String text, boolean error) {
+        status.setText(text);
+        status.setTextColor(Ui.col(this, error ? R.color.status_err : R.color.status_ok));
+    }
+
+    private String versionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "";
+        }
     }
 }
