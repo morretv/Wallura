@@ -1652,9 +1652,8 @@ class App(ctk.CTk):
         self.banner = ctk.CTkLabel(self.banner_frame, text="", text_color="#ffb454", anchor="w",
                                    font=self._font(12))
         self.banner.pack(side="left", padx=14, pady=8)
-        if self.is_admin:
-            self._btn(self.banner_frame, "Tools installieren", self.on_install_tools, "secondary",
-                      height=28, width=140, font=self._font(12)).pack(side="right", padx=10, pady=6)
+        self._btn(self.banner_frame, "Tools installieren", self.on_install_tools, "secondary",
+                  height=28, width=140, font=self._font(12)).pack(side="right", padx=10, pady=6)
         self.upd_frame = ctk.CTkFrame(top, corner_radius=12, fg_color="#12303f",
                                       border_width=1, border_color=ACCENT_DIM)  # erst sichtbar, wenn ein Update da ist
         self.upd_label = ctk.CTkLabel(self.upd_frame, text="", anchor="w", font=self._font(13), text_color=TEXT)
@@ -1713,8 +1712,9 @@ class App(ctk.CTk):
         acc_box = self._section(inner, "Konto")
         if self.guest:
             row = self._row(acc_box, "Nicht angemeldet",
-                            "Wallura läuft ohne Anmeldung. Anmelden für Adminrechte und dauerhaftes "
-                            "Angemeldetbleiben – Bibliothek und laufende Wallpaper bleiben dabei erhalten.")
+                            "Wallura läuft ohne Anmeldung. System, Tools und Updates sind frei nutzbar. "
+                            "Anmelden für die Benutzerverwaltung und dauerhaftes Angemeldetbleiben – "
+                            "Bibliothek und laufende Wallpaper bleiben dabei erhalten.")
             self._btn(row, "Anmelden", self.login, "primary", width=130, height=32,
                       font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
         else:
@@ -1727,8 +1727,9 @@ class App(ctk.CTk):
             self._btn(row, "Ändern", self.change_password, "secondary", width=130, height=32,
                       font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
         if not self.is_admin:
-            ctk.CTkLabel(acc_box, text="System-, Tool- und Benutzer-Einstellungen sind Administratoren "
-                                      "vorbehalten.", font=self._font(11), text_color=MUTED, anchor="w",
+            ctk.CTkLabel(acc_box, text="System, Tools und Updates sind ohne Konto nutzbar – die "
+                                      "Benutzerverwaltung braucht ein Administratorkonto.",
+                         font=self._font(11), text_color=MUTED, anchor="w",
                          justify="left", wraplength=520).pack(fill="x", padx=18, pady=(0, 12))
         ctk.CTkFrame(acc_box, height=6, fg_color="transparent").pack()
 
@@ -1750,29 +1751,30 @@ class App(ctk.CTk):
         self.q_menu.grid(row=0, column=1, sticky="e", padx=(16, 0))
         ctk.CTkFrame(play, height=6, fg_color="transparent").pack()
 
-        if self.is_admin:
-            sysp = self._section(inner, "System")
-            self.sw_pause = self._switch_row(sysp, "Pause, wenn der Desktop verdeckt ist",
-                                             "Spart Leistung, solange Spiele oder Vollbild-Apps laufen.",
-                                             self.on_pause_fs, self.cfg["pause_fullscreen"])
-            self.sw_auto = self._switch_row(sysp, "Mit Windows starten",
-                                            "Wallura startet im Hintergrund (Tray-Symbol).",
-                                            self.on_autostart, is_autostart())
-            ctk.CTkFrame(sysp, height=6, fg_color="transparent").pack()
+        # System und Tools & Updates stehen jedem zur Verfügung – auch ohne Konto (Gastmodus).
+        sysp = self._section(inner, "System")
+        self.sw_pause = self._switch_row(sysp, "Pause, wenn der Desktop verdeckt ist",
+                                         "Spart Leistung, solange Spiele oder Vollbild-Apps laufen.",
+                                         self.on_pause_fs, self.cfg["pause_fullscreen"])
+        self.sw_auto = self._switch_row(sysp, "Mit Windows starten",
+                                        "Wallura startet im Hintergrund (Tray-Symbol).",
+                                        self.on_autostart, is_autostart())
+        ctk.CTkFrame(sysp, height=6, fg_color="transparent").pack()
 
-            tools = self._section(inner, "Tools & Updates")
-            row = self._row(tools, "Tools", "mpv (Player) und yt-dlp (Downloads)")
-            self.tools_desc = row.desc
-            self._btn(row, "Installieren / aktualisieren", self.on_install_tools, "secondary", width=200,
-                      height=32, font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
-            row = self._row(tools, f"Wallura {APP_VERSION}", "Sucht bei GitHub nach einer neuen Version.")
-            self._btn(row, "Nach Updates suchen", lambda: self.check_updates(True), "secondary", width=200,
-                      height=32, font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
-            self.sw_upd = self._switch_row(tools, "Updates automatisch laden",
-                                           "Prüft beim Start und alle 6 Stunden, lädt neue Versionen herunter.",
-                                           self.on_auto_update, self.cfg.get("auto_update", True))
-            ctk.CTkFrame(tools, height=6, fg_color="transparent").pack()
+        tools = self._section(inner, "Tools & Updates")
+        row = self._row(tools, "Tools", "mpv (Player) und yt-dlp (Downloads)")
+        self.tools_desc = row.desc
+        self._btn(row, "Installieren / aktualisieren", self.on_install_tools, "secondary", width=200,
+                  height=32, font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
+        row = self._row(tools, f"Wallura {APP_VERSION}", "Sucht bei GitHub nach einer neuen Version.")
+        self._btn(row, "Nach Updates suchen", lambda: self.check_updates(True), "secondary", width=200,
+                  height=32, font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
+        self.sw_upd = self._switch_row(tools, "Updates automatisch laden",
+                                       "Prüft beim Start und alle 6 Stunden, lädt neue Versionen herunter.",
+                                       self.on_auto_update, self.cfg.get("auto_update", True))
+        ctk.CTkFrame(tools, height=6, fg_color="transparent").pack()
 
+        if self.is_admin:  # Konten anlegen/ändern bleibt Administratoren vorbehalten
             self._users_box = self._section(inner, "Benutzer")
             row = self._row(self._users_box, "Konten",
                             "Wer sich anmelden darf und wer Adminrechte hat (nur Administratoren).")
@@ -2259,13 +2261,8 @@ class App(ctk.CTk):
 
     def _show_update_bar(self, info, path):
         self.update_file = path
-        if self.is_admin:
-            self.upd_label.configure(text=f"Update v{info['version']} ist bereit.")
-            self.upd_btn.configure(text="Jetzt installieren", command=self.install_update)
-        else:  # Installation ist Administratoren vorbehalten
-            self.upd_label.configure(text=f"Update v{info['version']} ist bereit – ein Administrator kann "
-                                          "es installieren.")
-            self.upd_btn.pack_forget()
+        self.upd_label.configure(text=f"Update v{info['version']} ist bereit.")
+        self.upd_btn.configure(text="Jetzt installieren", command=self.install_update)
         self.upd_frame.pack(fill="x", padx=6, pady=(0, 8))
         self.set_status(f"Update v{info['version']} heruntergeladen.")
         self._show_update_toast(info)
@@ -2310,11 +2307,8 @@ class App(ctk.CTk):
             close()
             self.install_update()
 
-        if self.is_admin:
-            self._btn(btns, "Jetzt installieren", install, "primary", height=34, width=150).pack(side="left")
-            self._btn(btns, "Später", close, "ghost", height=34, width=80).pack(side="left", padx=(8, 0))
-        else:
-            self._btn(btns, "OK", close, "primary", height=34, width=100).pack(side="left")
+        self._btn(btns, "Jetzt installieren", install, "primary", height=34, width=150).pack(side="left")
+        self._btn(btns, "Später", close, "ghost", height=34, width=80).pack(side="left", padx=(8, 0))
 
         t.update_idletasks()
         w, h = t.winfo_reqwidth(), t.winfo_reqheight()
@@ -2329,8 +2323,6 @@ class App(ctk.CTk):
         t.attributes("-topmost", True)
 
     def install_update(self):
-        if not self._require_admin():
-            return
         path = self.update_file
         if not path or not Path(path).exists():
             return
@@ -2390,9 +2382,6 @@ class App(ctk.CTk):
             self.set_status(f"Autostart ging nicht: {e}", True)
 
     def on_install_tools(self):
-        if not self._require_admin():
-            return
-
         def work():
             msg = install_tools(lambda s: self.ui(lambda: self.set_status(s)))
             self.ui(lambda: (self.set_status(msg), self._update_tools_banner()))
@@ -2410,9 +2399,6 @@ class App(ctk.CTk):
             self.banner_frame.pack(fill="x", pady=(0, 8))
         else:
             self.banner_frame.pack_forget()
-        if not self.is_admin and missing:
-            self.banner.configure(text="Fehlt noch: " + ", ".join(missing)
-                                  + " – ein Administrator muss die Tools installieren.")
         if self.tools_desc is not None:
             self.tools_desc.configure(text="  ·  ".join(f"{n}: {'gefunden' if ok else 'fehlt'}" for n, ok in found.items()))
 
@@ -2617,7 +2603,7 @@ class App(ctk.CTk):
                              lambda: self.ui(self.toggle_pause)),
             pystray.MenuItem(lambda item: f"Update v{(self.update_info or {}).get('version', '')} installieren",
                              lambda: self.ui(self.install_update),
-                             visible=lambda item: bool(self.update_file) and self.is_admin),
+                             visible=lambda item: bool(self.update_file)),
             pystray.MenuItem("Nächstes Wallpaper", lambda: self.ui(self.next_wallpaper)),
             pystray.MenuItem("Wallpaper stoppen", lambda: self.ui(self.stop_wallpaper)),
             pystray.Menu.SEPARATOR,
