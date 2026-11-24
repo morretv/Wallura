@@ -63,10 +63,12 @@ TOOLS_APP = APP_DIR / "tools"
 UPDATE_DIR = DATA_DIR / "update"
 CONFIG_FILE = DATA_DIR / "config.json"
 ACCOUNTS_FILE = DATA_DIR / "accounts.json"
+SESSION_FILE = DATA_DIR / "session.json"
 PASSWORD_ROUNDS = 200_000
 MIN_PW_LEN = 4
 USER_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{2,32}$")
 ROLES = {"admin": "Administrator", "user": "Nutzer"}
+GAST = "Gast"
 for _d in (DATA_DIR, LIB_DIR, THUMB_DIR, TOOLS_USER, UPDATE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
@@ -347,6 +349,49 @@ def delete_account(acc, name):
             acc["users"][key] = removed
         return False, "Die Konten-Datei ließ sich nicht speichern."
     return True, ""
+
+
+def _pw_fingerprint(user):
+    """Kurzer Fingerabdruck des Passwort-Hashes – merkt eine Änderung/ Zurücksetzung."""
+    return hashlib.sha256(str(user.get("pw", "")).encode("utf-8")).hexdigest()[:16]
+
+
+def clear_session():
+    try:
+        SESSION_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def save_session(name, remember=True):
+    """Merkt die Anmeldung für den nächsten Start („Angemeldet bleiben“)."""
+    if not remember:
+        clear_session()
+        return True
+    user = find_account(load_accounts(), name)
+    if not user:
+        return False
+    try:
+        _write_json(SESSION_FILE, {"user": str(name).strip().lower(), "fp": _pw_fingerprint(user)})
+        return True
+    except Exception:
+        return False
+
+
+def load_session():
+    """-> {"name", "role"} der gemerkten Anmeldung oder None (dann Gastmodus)."""
+    try:
+        data = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    key = str(data.get("user", "")).strip().lower()
+    user = find_account(load_accounts(), key)
+    if not user or data.get("fp") != _pw_fingerprint(user):
+        clear_session()  # Konto gelöscht oder Passwort geändert -> wieder Anmeldung nötig
+        return None
+    return {"name": user.get("name", key), "role": user.get("role", "user")}
 
 
 # ----------------------------------------------------------------------------- Tools & Helfer
@@ -1111,19 +1156,24 @@ def is_autostart():
 
 # ----------------------------------------------------------------------------- GUI
 # ----------------------------------------------------------------------------- Anmeldung
-class LoginWindow(ctk.CTk):
-    """Anmeldefenster vor dem Hauptfenster. run() -> Konto-Dict oder None (abgebrochen)."""
+class LoginDialog(ctk.CTkToplevel):
+    """Modaler Anmelde-/Einrichtungsdialog im laufenden Fenster.
+    .result = {"name", "role", "remember"} oder None (abgebrochen)."""
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, parent):
+        super().__init__(parent)
         self.result = None
         self._done = False
         self.acc = load_accounts()
-        self.setup_mode = not has_accounts(self.acc)  # erster Start: Admin-Konto anlegen
+        self.setup_mode = not has_accounts(self.acc)  # noch kein Konto: das erste wird Administrator
         self.title("Wallura – Konto einrichten" if self.setup_mode else "Wallura – Anmelden")
         self.configure(fg_color=BG)
         self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self.cancel)
+        try:
+            self.transient(parent)
+        except Exception:
+            pass
 
         box = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=18, border_width=1, border_color=BORDER)
         box.pack(fill="both", expand=True, padx=20, pady=20)
@@ -1140,7 +1190,8 @@ class LoginWindow(ctk.CTk):
         ctk.CTkLabel(box, text="Konto einrichten" if self.setup_mode else "Anmelden",
                      font=ui_font(18, "bold"), text_color=TEXT, anchor="w").pack(fill="x", padx=24, pady=(10, 2))
         ctk.CTkLabel(box, text=("Das erste Konto wird Administrator und darf Tools, Updates und Benutzer verwalten."
-                               if self.setup_mode else "Bitte mit Name und Passwort anmelden."),
+                               if self.setup_mode else "Bitte mit Name und Passwort anmelden. Wallpaper und "
+                               "Bibliothek bleiben beim Anmelden erhalten."),
                      font=ui_font(11), text_color=MUTED, anchor="w", justify="left",
                      wraplength=340).pack(fill="x", padx=24, pady=(0, 4))
 
@@ -1152,18 +1203,23 @@ class LoginWindow(ctk.CTk):
                                 justify="left", wraplength=340)
         self.err.pack(fill="x", padx=24, pady=(8, 0))
 
+        self.remember_var = ctk.BooleanVar(value=True)
+        if not self.setup_mode:
+            ctk.CTkCheckBox(box, text="Angemeldet bleiben (beim nächsten Start nicht erneut anmelden)",
+                            variable=self.remember_var, font=ui_font(11), text_color=MUTED,
+                            fg_color=ACCENT, hover_color=ACCENT_HOVER, border_color=BORDER,
+                            checkbox_width=18, checkbox_height=18).pack(fill="x", padx=24, pady=(10, 0))
         ctk.CTkButton(box, text="Konto erstellen" if self.setup_mode else "Anmelden", height=38,
                       corner_radius=10, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=ON_ACCENT,
                       font=ui_font(13, "bold"), command=self.submit).pack(fill="x", padx=24, pady=(12, 6))
-        if self.setup_mode:
-            ctk.CTkFrame(box, height=14, fg_color="transparent").pack()
-        else:
-            ctk.CTkButton(box, text="Beenden", height=32, corner_radius=10, fg_color="transparent",
-                          hover_color=SURFACE2, text_color=MUTED, font=ui_font(12),
-                          command=self.cancel).pack(fill="x", padx=24, pady=(0, 18))
+        ctk.CTkButton(box, text="Abbrechen", height=32, corner_radius=10, fg_color="transparent",
+                      hover_color=SURFACE2, text_color=MUTED, font=ui_font(12),
+                      command=self.cancel).pack(fill="x", padx=24, pady=(0, 18))
 
         self.bind("<Return>", lambda e: self.submit())
         self.bind("<Escape>", lambda e: self.cancel())
+        self._center(parent)
+        self.after(120, self._activate)
 
     def _entry(self, parent, label, show=""):
         ctk.CTkLabel(parent, text=label, font=ui_font(12), text_color=TEXT, anchor="w").pack(
@@ -1189,18 +1245,21 @@ class LoginWindow(ctk.CTk):
                 self.err.configure(text=err)
                 return
             user = find_account(self.acc, name)
-            self._finish({"name": user.get("name", name), "role": user.get("role", "admin")})
+            self._finish({"name": user.get("name", name), "role": user.get("role", "admin"),
+                          "remember": True})
         else:
             user = authenticate(self.acc, name, pw)
             if not user:
                 self.err.configure(text="Name oder Passwort ist falsch.")
                 return
             # Passwort-Hash bewusst nicht in die Sitzung übernehmen
-            self._finish({"name": user.get("name", name), "role": user.get("role", "user")})
+            self._finish({"name": user.get("name", name), "role": user.get("role", "user"),
+                          "remember": bool(self.remember_var.get())})
 
     def _finish(self, session):
         self._done = True
         self.result = session
+        self._release()
         self.destroy()
 
     def cancel(self):
@@ -1208,19 +1267,34 @@ class LoginWindow(ctk.CTk):
             return
         self._done = True
         self.result = None
+        self._release()
         self.destroy()
 
-    def run(self):
+    def _release(self):
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+
+    def _activate(self):
+        try:
+            self.grab_set()
+        except Exception:
+            pass
+        try:
+            self.e_name.focus_set()
+        except Exception:
+            pass
+
+    def _center(self, parent):
         self.update_idletasks()
-        w, h = 440, self.winfo_reqheight()
-        x = max(0, (self.winfo_screenwidth() - w) // 2)
-        y = max(0, (self.winfo_screenheight() - h) // 3)
-        self.geometry(f"{w}x{h}+{x}+{y}")
-        self.attributes("-topmost", True)
-        self.after(1200, lambda: self.attributes("-topmost", False))
-        self.after(120, lambda: self.e_name.focus_set())
-        self.mainloop()
-        return self.result
+        w, h = max(420, self.winfo_reqwidth()), self.winfo_reqheight()
+        try:
+            px, py = parent.winfo_rootx(), parent.winfo_rooty()
+            pw, ph = parent.winfo_width(), parent.winfo_height()
+        except Exception:
+            px, py, pw, ph = 0, 0, self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{w}x{h}+{px + max(0, (pw - w) // 2)}+{py + max(0, (ph - h) // 3)}")
 
 
 class FormDialog(ctk.CTkToplevel):
@@ -1310,11 +1384,12 @@ class FormDialog(ctk.CTkToplevel):
 class App(ctk.CTk):
     def __init__(self, session=None, start_hidden=False):
         super().__init__()
-        self.user = session or {"name": "Gast", "role": "user"}
-        self.logout_requested = False
+        self.user = session or {"name": GAST, "role": "user"}
+        self.guest = session is None  # ohne Anmeldung starten – Anmelden geht jederzeit über den Button
+        self._login_open = False
         self.acc = load_accounts()
         self.tools_desc = None
-        self.title(f"Wallura {APP_VERSION} – {self.user.get('name', 'Gast')}")
+        self._update_title()
         self.geometry("1240x820")
         self.minsize(1060, 680)
         self.cfg = load_config()
@@ -1417,6 +1492,10 @@ class App(ctk.CTk):
     @property
     def is_admin(self):
         return self.user.get("role") == "admin"
+
+    def _update_title(self):
+        self.title(f"Wallura {APP_VERSION}" if self.guest
+                   else f"Wallura {APP_VERSION} – {self.user.get('name', GAST)}")
 
     def _require_admin(self):
         if self.is_admin:
@@ -1528,13 +1607,16 @@ class App(ctk.CTk):
         usercard.pack(side="top", fill="x", padx=14, pady=(14, 4))
         uinfo = ctk.CTkFrame(usercard, fg_color="transparent")
         uinfo.pack(fill="x", padx=14, pady=(12, 0))
-        ctk.CTkLabel(uinfo, text="ANGEMELDET", font=self._font(10, "bold"), text_color=MUTED,
+        ctk.CTkLabel(uinfo, text="NICHT ANGEMELDET" if self.guest else "ANGEMELDET",
+                     font=self._font(10, "bold"), text_color=MUTED, anchor="w").pack(fill="x")
+        ctk.CTkLabel(uinfo, text=self.user.get("name", GAST), font=self._font(14, "bold"), text_color=TEXT,
                      anchor="w").pack(fill="x")
-        ctk.CTkLabel(uinfo, text=self.user.get("name", "Gast"), font=self._font(14, "bold"), text_color=TEXT,
+        ctk.CTkLabel(uinfo, text="Gastmodus" if self.guest else ROLES.get(self.user.get("role"), "Nutzer"),
+                     font=self._font(11), text_color=ACCENT if self.is_admin else MUTED,
                      anchor="w").pack(fill="x")
-        ctk.CTkLabel(uinfo, text=ROLES.get(self.user.get("role"), "Nutzer"), font=self._font(11),
-                     text_color=ACCENT if self.is_admin else MUTED, anchor="w").pack(fill="x")
-        self._btn(usercard, "Abmelden", self.logout, "ghost", height=28,
+        self._btn(usercard, "Anmelden" if self.guest else "Abmelden",
+                  self.login if self.guest else self.logout,
+                  "primary" if self.guest else "ghost", height=28,
                   font=self._font(12)).pack(fill="x", padx=10, pady=(6, 10))
 
         ctk.CTkLabel(side, text=COPYRIGHT, font=self._font(10), text_color=MUTED, anchor="center",
@@ -1629,13 +1711,21 @@ class App(ctk.CTk):
                      anchor="w").pack(fill="x", pady=(0, 14))
 
         acc_box = self._section(inner, "Konto")
-        row = self._row(acc_box, f"{self.user.get('name', 'Gast')}  ·  {ROLES.get(self.user.get('role'), 'Nutzer')}",
-                        "Angemeldet auf diesem PC. Beim Start fragt Wallura nach dem Passwort.")
-        self._btn(row, "Abmelden", self.logout, "secondary", width=130, height=32,
-                  font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
-        row = self._row(acc_box, "Passwort ändern", "Für das eigene Konto (aktuelles Passwort nötig).")
-        self._btn(row, "Ändern", self.change_password, "secondary", width=130, height=32,
-                  font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
+        if self.guest:
+            row = self._row(acc_box, "Nicht angemeldet",
+                            "Wallura läuft ohne Anmeldung. Anmelden für Adminrechte und dauerhaftes "
+                            "Angemeldetbleiben – Bibliothek und laufende Wallpaper bleiben dabei erhalten.")
+            self._btn(row, "Anmelden", self.login, "primary", width=130, height=32,
+                      font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
+        else:
+            row = self._row(acc_box, f"{self.user.get('name', GAST)}  ·  "
+                                     f"{ROLES.get(self.user.get('role'), 'Nutzer')}",
+                            "Angemeldet auf diesem PC – Bibliothek und Wallpaper laufen weiter.")
+            self._btn(row, "Abmelden", self.logout, "secondary", width=130, height=32,
+                      font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
+            row = self._row(acc_box, "Passwort ändern", "Für das eigene Konto (aktuelles Passwort nötig).")
+            self._btn(row, "Ändern", self.change_password, "secondary", width=130, height=32,
+                      font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
         if not self.is_admin:
             ctk.CTkLabel(acc_box, text="System-, Tool- und Benutzer-Einstellungen sind Administratoren "
                                       "vorbehalten.", font=self._font(11), text_color=MUTED, anchor="w",
@@ -2338,17 +2428,62 @@ class App(ctk.CTk):
         d.wait_window()
         return d.result
 
-    def logout(self):
-        if self._closing:
+    def login(self):
+        """Anmelden im laufenden Fenster – laufende Wallpaper und Bibliothek bleiben erhalten."""
+        if not self.guest or self._login_open or self._closing:
             return
-        self._closing = True
-        self.logout_requested = True
-        self.player.shutdown()
+        self.show_window()
+        self._login_open = True
         try:
-            self.tray.stop()
-        except Exception:
-            pass
-        self.destroy()
+            dlg = LoginDialog(self)
+            dlg.wait_window()
+            res = dlg.result
+        finally:
+            self._login_open = False
+        if not res:
+            return
+        self.user = {"name": res["name"], "role": res.get("role", "user")}
+        self.guest = False
+        self.acc = load_accounts()
+        remembered = bool(res.get("remember")) and save_session(res["name"], True)
+        self._rebuild_ui()
+        self.set_status(f"Angemeldet als {res['name']}."
+                        + (" Angemeldet bleiben ist aktiv." if remembered else ""))
+
+    def logout(self):
+        """Zurück in den Gastmodus – Wallpaper laufen weiter."""
+        if self.guest or self._closing:
+            return
+        clear_session()
+        self.user = {"name": GAST, "role": "user"}
+        self.guest = True
+        self.acc = load_accounts()
+        self._rebuild_ui()
+        self.set_status("Abgemeldet – Wallpaper laufen weiter.")
+
+    def _rebuild_ui(self):
+        """Oberfläche neu aufbauen (Adminbereiche erscheinen/verschwinden), ohne den Player anzufassen."""
+        page = getattr(self, "_page", "library")
+        for job in (self._volume_job, self._search_job, self._resize_job):
+            if job:
+                try:
+                    self.after_cancel(job)
+                except Exception:
+                    pass
+        self._volume_job = self._search_job = self._resize_job = None
+        self.tools_desc = None  # Zeigt sonst auf ein bereits zerstörtes Label
+        for w in self.winfo_children():
+            w.destroy()
+        self._last_cols = 0
+        self._prev_cols = 0
+        self._build_ui()
+        self.refresh_library()
+        self._update_tools_banner()
+        self._update_title()
+        self.btn_pause.configure(text="Weiter" if self.player.paused_manual else "Pause")
+        self._show_page(page if page in self._pages else "library")
+        if self.update_file and self.update_info:
+            self._show_update_bar(self.update_info, self.update_file)
 
     def change_password(self):
         res = self._form("Passwort ändern", [
@@ -2476,6 +2611,8 @@ class App(ctk.CTk):
     def _setup_tray(self):
         menu = pystray.Menu(
             pystray.MenuItem("Wallura öffnen", lambda: self.ui(self.show_window), default=True),
+            pystray.MenuItem(lambda item: "Anmelden" if self.guest else "Abmelden",
+                             lambda: self.ui(self.login if self.guest else self.logout)),
             pystray.MenuItem(lambda item: "Fortsetzen" if self.player.paused_manual else "Pause",
                              lambda: self.ui(self.toggle_pause)),
             pystray.MenuItem(lambda item: f"Update v{(self.update_info or {}).get('version', '')} installieren",
@@ -2524,17 +2661,9 @@ def main():
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
     start_hidden = "--minimized" in sys.argv
-    first_session = True
-    while True:  # Anmelden -> Wallura -> (Abmelden -> wieder Anmelden) oder Ende
-        session = LoginWindow().run()
-        if not session:
-            break
-        # Nur der Autostart-Start ist versteckt; nach „Abmelden“ soll das Fenster sichtbar sein.
-        app = App(session=session, start_hidden=start_hidden and first_session)
-        first_session = False
-        app.mainloop()
-        if not app.logout_requested:
-            break
+    # Kein Pflicht-Login mehr: gemerkte Sitzung („Angemeldet bleiben“) oder Gastmodus mit „Anmelden“-Button.
+    app = App(session=load_session(), start_hidden=start_hidden)
+    app.mainloop()
     del mutex
 
 
