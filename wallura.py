@@ -10,6 +10,7 @@ Copyright (c) 2026 MorreTv. MIT-Lizenz (siehe LICENSE).
 """
 import ctypes
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -61,6 +62,11 @@ TOOLS_USER = DATA_DIR / "tools"
 TOOLS_APP = APP_DIR / "tools"
 UPDATE_DIR = DATA_DIR / "update"
 CONFIG_FILE = DATA_DIR / "config.json"
+ACCOUNTS_FILE = DATA_DIR / "accounts.json"
+PASSWORD_ROUNDS = 200_000
+MIN_PW_LEN = 4
+USER_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{2,32}$")
+ROLES = {"admin": "Administrator", "user": "Nutzer"}
 for _d in (DATA_DIR, LIB_DIR, THUMB_DIR, TOOLS_USER, UPDATE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
@@ -111,6 +117,16 @@ DEFAULTS = {
 }
 
 
+# ----------------------------------------------------------------------------- UI-Helfer
+def ui_font(size=13, weight="normal"):
+    return ctk.CTkFont(family=FONT, size=size, weight=weight)
+
+
+MENU_STYLE = dict(fg_color=SURFACE2, button_color=BORDER, button_hover_color="#3a4150",
+                  dropdown_fg_color=SURFACE2, dropdown_hover_color=BORDER, dropdown_text_color=TEXT,
+                  text_color=TEXT, corner_radius=8, height=32)
+
+
 # ----------------------------------------------------------------------------- Config
 def load_config():
     cfg = dict(DEFAULTS)
@@ -131,6 +147,111 @@ def save_config(cfg):
         CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
+
+
+# ----------------------------------------------------------------------------- Konten
+def _hash_password(pw):
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", str(pw).encode("utf-8"), salt, PASSWORD_ROUNDS)
+    return f"pbkdf2_sha256${PASSWORD_ROUNDS}${salt.hex()}${digest.hex()}"
+
+
+def _password_ok(pw, stored):
+    try:
+        algo, rounds, salt_hex, digest_hex = str(stored).split("$")
+        if algo != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac("sha256", str(pw).encode("utf-8"), bytes.fromhex(salt_hex), int(rounds))
+        return hmac.compare_digest(digest.hex(), digest_hex)
+    except Exception:
+        return False
+
+
+def load_accounts():
+    data = None
+    try:
+        data = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    if not isinstance(data, dict) or not isinstance(data.get("users"), dict):
+        data = {"users": {}}
+    return data
+
+
+def save_accounts(acc):
+    try:
+        ACCOUNTS_FILE.write_text(json.dumps(acc, indent=2, ensure_ascii=False), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def has_accounts(acc=None):
+    return bool((acc or load_accounts())["users"])
+
+
+def find_account(acc, name):
+    return acc["users"].get(str(name).strip().lower())
+
+
+def create_account(acc, name, pw, role="user"):
+    """-> (ok, Fehlertext)"""
+    name = str(name).strip()
+    if not USER_NAME_RE.match(name):
+        return False, "Name: 2–32 Zeichen, nur Buchstaben, Zahlen, Punkt, _ und -"
+    if len(str(pw)) < MIN_PW_LEN:
+        return False, f"Das Passwort braucht mindestens {MIN_PW_LEN} Zeichen."
+    if name.lower() in acc["users"]:
+        return False, "Diesen Benutzernamen gibt es schon."
+    acc["users"][name.lower()] = {"name": name, "pw": _hash_password(pw), "role": role,
+                                   "created": int(time.time())}
+    if not save_accounts(acc):
+        return False, "Die Konten-Datei ließ sich nicht speichern."
+    return True, ""
+
+
+def authenticate(acc, name, pw):
+    user = find_account(acc, name)
+    if user and _password_ok(pw, user.get("pw")):
+        return user
+    return None
+
+
+def admin_count(acc):
+    return sum(1 for u in acc["users"].values() if u.get("role") == "admin")
+
+
+def set_password(acc, name, pw):
+    user = find_account(acc, name)
+    if not user:
+        return False, "Konto nicht gefunden."
+    if len(str(pw)) < MIN_PW_LEN:
+        return False, f"Das Passwort braucht mindestens {MIN_PW_LEN} Zeichen."
+    user["pw"] = _hash_password(pw)
+    save_accounts(acc)
+    return True, ""
+
+
+def set_role(acc, name, role):
+    user = find_account(acc, name)
+    if not user:
+        return False, "Konto nicht gefunden."
+    if user.get("role") == "admin" and role != "admin" and admin_count(acc) <= 1:
+        return False, "Der letzte Administrator kann nicht herabgestuft werden."
+    user["role"] = role
+    save_accounts(acc)
+    return True, ""
+
+
+def delete_account(acc, name):
+    user = find_account(acc, name)
+    if not user:
+        return False, "Konto nicht gefunden."
+    if user.get("role") == "admin" and admin_count(acc) <= 1:
+        return False, "Der letzte Administrator kann nicht gelöscht werden."
+    acc["users"].pop(str(name).strip().lower(), None)
+    save_accounts(acc)
+    return True, ""
 
 
 # ----------------------------------------------------------------------------- Tools & Helfer
@@ -880,10 +1001,199 @@ def is_autostart():
 
 
 # ----------------------------------------------------------------------------- GUI
-class App(ctk.CTk):
-    def __init__(self, start_hidden=False):
+# ----------------------------------------------------------------------------- Anmeldung
+class LoginWindow(ctk.CTk):
+    """Anmeldefenster vor dem Hauptfenster. run() -> Konto-Dict oder None (abgebrochen)."""
+
+    def __init__(self):
         super().__init__()
-        self.title(f"Wallura {APP_VERSION}")
+        self.result = None
+        self.acc = load_accounts()
+        self.setup_mode = not has_accounts(self.acc)  # erster Start: Admin-Konto anlegen
+        self.title("Wallura – Konto einrichten" if self.setup_mode else "Wallura – Anmelden")
+        self.configure(fg_color=BG)
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self.cancel)
+
+        box = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=18, border_width=1, border_color=BORDER)
+        box.pack(fill="both", expand=True, padx=20, pady=20)
+
+        head = ctk.CTkFrame(box, fg_color="transparent")
+        head.pack(fill="x", padx=24, pady=(20, 4))
+        try:
+            self._logo = ctk.CTkImage(make_icon(128), size=(38, 38))
+            ctk.CTkLabel(head, image=self._logo, text="").pack(side="left", padx=(0, 12))
+        except Exception:
+            pass
+        ctk.CTkLabel(head, text="Wallura", font=ui_font(20, "bold"), text_color=TEXT).pack(side="left")
+
+        ctk.CTkLabel(box, text="Konto einrichten" if self.setup_mode else "Anmelden",
+                     font=ui_font(18, "bold"), text_color=TEXT, anchor="w").pack(fill="x", padx=24, pady=(10, 2))
+        ctk.CTkLabel(box, text=("Das erste Konto wird Administrator und darf Tools, Updates und Benutzer verwalten."
+                               if self.setup_mode else "Bitte mit Name und Passwort anmelden."),
+                     font=ui_font(11), text_color=MUTED, anchor="w", justify="left",
+                     wraplength=340).pack(fill="x", padx=24, pady=(0, 4))
+
+        self.e_name = self._entry(box, "Benutzername")
+        self.e_pw = self._entry(box, "Passwort", show="•")
+        self.e_pw2 = self._entry(box, "Passwort wiederholen", show="•") if self.setup_mode else None
+
+        self.err = ctk.CTkLabel(box, text="", font=ui_font(11), text_color=STATUS_ERR, anchor="w",
+                                justify="left", wraplength=340)
+        self.err.pack(fill="x", padx=24, pady=(8, 0))
+
+        ctk.CTkButton(box, text="Konto erstellen" if self.setup_mode else "Anmelden", height=38,
+                      corner_radius=10, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=ON_ACCENT,
+                      font=ui_font(13, "bold"), command=self.submit).pack(fill="x", padx=24, pady=(12, 6))
+        if self.setup_mode:
+            ctk.CTkFrame(box, height=14, fg_color="transparent").pack()
+        else:
+            ctk.CTkButton(box, text="Beenden", height=32, corner_radius=10, fg_color="transparent",
+                          hover_color=SURFACE2, text_color=MUTED, font=ui_font(12),
+                          command=self.cancel).pack(fill="x", padx=24, pady=(0, 18))
+
+        self.bind("<Return>", lambda e: self.submit())
+        self.bind("<Escape>", lambda e: self.cancel())
+
+    def _entry(self, parent, label, show=""):
+        ctk.CTkLabel(parent, text=label, font=ui_font(12), text_color=TEXT, anchor="w").pack(
+            fill="x", padx=24, pady=(8, 3))
+        e = ctk.CTkEntry(parent, height=36, corner_radius=10, fg_color=SURFACE2, border_color=BORDER,
+                         text_color=TEXT, show=show, font=ui_font(13))
+        e.pack(fill="x", padx=24)
+        return e
+
+    def submit(self):
+        name, pw = self.e_name.get().strip(), self.e_pw.get()
+        if not name or not pw:
+            self.err.configure(text="Bitte Name und Passwort eingeben.")
+            return
+        if self.setup_mode:
+            if pw != self.e_pw2.get():
+                self.err.configure(text="Die Passwörter sind nicht gleich.")
+                return
+            ok, err = create_account(self.acc, name, pw, "admin")
+            if not ok:
+                self.err.configure(text=err)
+                return
+            self.result = find_account(self.acc, name)
+        else:
+            user = authenticate(self.acc, name, pw)
+            if not user:
+                self.err.configure(text="Name oder Passwort ist falsch.")
+                return
+            self.result = user
+        self.destroy()
+
+    def cancel(self):
+        self.result = None
+        self.destroy()
+
+    def run(self):
+        self.update_idletasks()
+        w, h = 440, self.winfo_reqheight()
+        x = max(0, (self.winfo_screenwidth() - w) // 2)
+        y = max(0, (self.winfo_screenheight() - h) // 3)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.attributes("-topmost", True)
+        self.after(1200, lambda: self.attributes("-topmost", False))
+        self.after(120, lambda: self.e_name.focus_set())
+        self.mainloop()
+        return self.result
+
+
+class FormDialog(ctk.CTkToplevel):
+    """Modaler Dialog mit Eingabefeldern. .result ist None (abgebrochen) oder {key: wert}."""
+
+    def __init__(self, parent, title, fields, subtitle=None, ok_text="Speichern"):
+        super().__init__(parent)
+        self.result = None
+        self._vars = {}
+        self.title(title)
+        self.configure(fg_color=BG)
+        self.resizable(False, False)
+        try:
+            self.transient(parent)
+        except Exception:
+            pass
+
+        box = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=16, border_width=1, border_color=BORDER)
+        box.pack(fill="both", expand=True, padx=16, pady=16)
+        ctk.CTkLabel(box, text=title, font=ui_font(18, "bold"), text_color=TEXT,
+                     anchor="w").pack(fill="x", padx=20, pady=(18, 2))
+        if subtitle:
+            ctk.CTkLabel(box, text=subtitle, font=ui_font(11), text_color=MUTED, anchor="w", justify="left",
+                         wraplength=340).pack(fill="x", padx=20, pady=(0, 2))
+
+        self._first = None
+        for field in fields:
+            ctk.CTkLabel(box, text=field["label"], font=ui_font(12), text_color=TEXT,
+                         anchor="w").pack(fill="x", padx=20, pady=(10, 3))
+            if field.get("type") == "menu":
+                var = ctk.StringVar(value=field.get("value") or field["values"][0])
+                ctk.CTkOptionMenu(box, values=field["values"], variable=var,
+                                  **MENU_STYLE).pack(fill="x", padx=20)
+            else:
+                var = ctk.StringVar()
+                entry = ctk.CTkEntry(box, textvariable=var, show="•" if field.get("type") == "pw" else "",
+                                     height=34, corner_radius=10, fg_color=SURFACE2, border_color=BORDER,
+                                     text_color=TEXT, font=ui_font(13))
+                entry.pack(fill="x", padx=20)
+                if self._first is None:
+                    self._first = entry
+            self._vars[field["key"]] = var
+
+        btns = ctk.CTkFrame(box, fg_color="transparent")
+        btns.pack(fill="x", padx=20, pady=(18, 18))
+        ctk.CTkButton(btns, text=ok_text, height=34, corner_radius=10, fg_color=ACCENT,
+                      hover_color=ACCENT_HOVER, text_color=ON_ACCENT, font=ui_font(13, "bold"),
+                      command=self._ok).pack(side="right")
+        ctk.CTkButton(btns, text="Abbrechen", height=34, corner_radius=10, fg_color=SURFACE2,
+                      hover_color=BORDER, text_color=TEXT, border_width=1, border_color=BORDER,
+                      font=ui_font(13), command=self.cancel).pack(side="right", padx=(0, 8))
+
+        self.bind("<Return>", lambda e: self._ok())
+        self.bind("<Escape>", lambda e: self.cancel())
+        self._center(parent)
+        self.after(120, self._activate)
+
+    def _activate(self):
+        try:
+            self.grab_set()
+        except Exception:
+            pass
+        if self._first is not None:
+            self._first.focus_set()
+
+    def _center(self, parent):
+        self.update_idletasks()
+        w, h = max(400, self.winfo_reqwidth()), self.winfo_reqheight()
+        try:
+            px, py, pw, ph = parent.winfo_rootx(), parent.winfo_rooty(), parent.winfo_width(), parent.winfo_height()
+        except Exception:
+            px, py, pw, ph = 0, 0, self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{w}x{h}+{px + max(0, (pw - w) // 2)}+{py + max(0, (ph - h) // 3)}")
+
+    def _ok(self):
+        self.result = {k: v.get() for k, v in self._vars.items()}
+        self.cancel()
+
+    def cancel(self):
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+
+
+class App(ctk.CTk):
+    def __init__(self, session=None, start_hidden=False):
+        super().__init__()
+        self.user = session or {"name": "Gast", "role": "user"}
+        self.logout_requested = False
+        self.acc = load_accounts()
+        self.tools_desc = None
+        self.title(f"Wallura {APP_VERSION} – {self.user.get('name', 'Gast')}")
         self.geometry("1240x820")
         self.minsize(1060, 680)
         self.cfg = load_config()
@@ -976,8 +1286,18 @@ class App(ctk.CTk):
         self.after(100, self._poll)
 
     # -- Aufbau
+    @property
+    def is_admin(self):
+        return self.user.get("role") == "admin"
+
+    def _require_admin(self):
+        if self.is_admin:
+            return True
+        self.set_status("Nur Administratoren dürfen das ändern.", True)
+        return False
+
     def _font(self, size=13, weight="normal"):
-        return ctk.CTkFont(family=FONT, size=size, weight=weight)
+        return ui_font(size, weight)
 
     def _btn(self, parent, text, command, kind="secondary", **kw):
         styles = {
@@ -995,10 +1315,7 @@ class App(ctk.CTk):
         return ctk.CTkButton(parent, text=text, **opts)
 
     def _menu_style(self):
-        return dict(fg_color=SURFACE2, button_color=BORDER, button_hover_color="#3a4150",
-                    dropdown_fg_color=SURFACE2, dropdown_hover_color=BORDER, dropdown_text_color=TEXT,
-                    text_color=TEXT, corner_radius=8, height=32, font=self._font(13),
-                    dropdown_font=self._font(13))
+        return dict(MENU_STYLE, font=self._font(13), dropdown_font=self._font(13))
 
     # -- Bausteine für die Einstellungen
     def _section(self, parent, title):
@@ -1078,6 +1395,20 @@ class App(ctk.CTk):
         self._nav_btn(side, "Bibliothek", "library")
         self._nav_btn(side, "Einstellungen", "settings")
 
+        # Angemeldetes Konto
+        usercard = ctk.CTkFrame(side, corner_radius=16, fg_color=SURFACE2, border_width=1, border_color=BORDER)
+        usercard.pack(side="top", fill="x", padx=14, pady=(14, 4))
+        uinfo = ctk.CTkFrame(usercard, fg_color="transparent")
+        uinfo.pack(fill="x", padx=14, pady=(12, 0))
+        ctk.CTkLabel(uinfo, text="ANGEMELDET", font=self._font(10, "bold"), text_color=MUTED,
+                     anchor="w").pack(fill="x")
+        ctk.CTkLabel(uinfo, text=self.user.get("name", "Gast"), font=self._font(14, "bold"), text_color=TEXT,
+                     anchor="w").pack(fill="x")
+        ctk.CTkLabel(uinfo, text=ROLES.get(self.user.get("role"), "Nutzer"), font=self._font(11),
+                     text_color=ACCENT if self.is_admin else MUTED, anchor="w").pack(fill="x")
+        self._btn(usercard, "Abmelden", self.logout, "ghost", height=28,
+                  font=self._font(12)).pack(fill="x", padx=10, pady=(6, 10))
+
         ctk.CTkLabel(side, text=COPYRIGHT, font=self._font(10), text_color=MUTED, anchor="center",
                      wraplength=SIDEBAR_W - 24).pack(side="bottom", fill="x", padx=12, pady=(0, 12))
 
@@ -1111,8 +1442,9 @@ class App(ctk.CTk):
         self.banner = ctk.CTkLabel(self.banner_frame, text="", text_color="#ffb454", anchor="w",
                                    font=self._font(12))
         self.banner.pack(side="left", padx=14, pady=8)
-        self._btn(self.banner_frame, "Tools installieren", self.on_install_tools, "secondary",
-                  height=28, width=140, font=self._font(12)).pack(side="right", padx=10, pady=6)
+        if self.is_admin:
+            self._btn(self.banner_frame, "Tools installieren", self.on_install_tools, "secondary",
+                      height=28, width=140, font=self._font(12)).pack(side="right", padx=10, pady=6)
         self.upd_frame = ctk.CTkFrame(top, corner_radius=12, fg_color="#12303f",
                                       border_width=1, border_color=ACCENT_DIM)  # erst sichtbar, wenn ein Update da ist
         self.upd_label = ctk.CTkLabel(self.upd_frame, text="", anchor="w", font=self._font(13), text_color=TEXT)
@@ -1168,6 +1500,20 @@ class App(ctk.CTk):
         ctk.CTkLabel(inner, text="Einstellungen", font=self._font(26, "bold"), text_color=TEXT,
                      anchor="w").pack(fill="x", pady=(0, 14))
 
+        acc_box = self._section(inner, "Konto")
+        row = self._row(acc_box, f"{self.user.get('name', 'Gast')}  ·  {ROLES.get(self.user.get('role'), 'Nutzer')}",
+                        "Angemeldet auf diesem PC. Beim Start fragt Wallura nach dem Passwort.")
+        self._btn(row, "Abmelden", self.logout, "secondary", width=130, height=32,
+                  font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
+        row = self._row(acc_box, "Passwort ändern", "Für das eigene Konto (aktuelles Passwort nötig).")
+        self._btn(row, "Ändern", self.change_password, "secondary", width=130, height=32,
+                  font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
+        if not self.is_admin:
+            ctk.CTkLabel(acc_box, text="System-, Tool- und Benutzer-Einstellungen sind Administratoren "
+                                      "vorbehalten.", font=self._font(11), text_color=MUTED, anchor="w",
+                         justify="left", wraplength=520).pack(fill="x", padx=18, pady=(0, 12))
+        ctk.CTkFrame(acc_box, height=6, fg_color="transparent").pack()
+
         play = self._section(inner, "Wiedergabe")
         row = self._row(play, "Anpassung", "Wie das Video auf den Monitor gelegt wird.")
         self.fit_menu = ctk.CTkOptionMenu(row, values=list(FIT_MAP), command=self.on_fit, width=200,
@@ -1186,27 +1532,38 @@ class App(ctk.CTk):
         self.q_menu.grid(row=0, column=1, sticky="e", padx=(16, 0))
         ctk.CTkFrame(play, height=6, fg_color="transparent").pack()
 
-        sysp = self._section(inner, "System")
-        self.sw_pause = self._switch_row(sysp, "Pause, wenn der Desktop verdeckt ist",
-                                         "Spart Leistung, solange Spiele oder Vollbild-Apps laufen.",
-                                         self.on_pause_fs, self.cfg["pause_fullscreen"])
-        self.sw_auto = self._switch_row(sysp, "Mit Windows starten",
-                                        "Wallura startet im Hintergrund (Tray-Symbol).",
-                                        self.on_autostart, is_autostart())
-        ctk.CTkFrame(sysp, height=6, fg_color="transparent").pack()
+        if self.is_admin:
+            sysp = self._section(inner, "System")
+            self.sw_pause = self._switch_row(sysp, "Pause, wenn der Desktop verdeckt ist",
+                                             "Spart Leistung, solange Spiele oder Vollbild-Apps laufen.",
+                                             self.on_pause_fs, self.cfg["pause_fullscreen"])
+            self.sw_auto = self._switch_row(sysp, "Mit Windows starten",
+                                            "Wallura startet im Hintergrund (Tray-Symbol).",
+                                            self.on_autostart, is_autostart())
+            ctk.CTkFrame(sysp, height=6, fg_color="transparent").pack()
 
-        tools = self._section(inner, "Tools & Updates")
-        row = self._row(tools, "Tools", "mpv (Player) und yt-dlp (Downloads)")
-        self.tools_desc = row.desc
-        self._btn(row, "Installieren / aktualisieren", self.on_install_tools, "secondary", width=200,
-                  height=32, font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
-        row = self._row(tools, f"Wallura {APP_VERSION}", "Sucht bei GitHub nach einer neuen Version.")
-        self._btn(row, "Nach Updates suchen", lambda: self.check_updates(True), "secondary", width=200,
-                  height=32, font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
-        self.sw_upd = self._switch_row(tools, "Updates automatisch laden",
-                                       "Prüft beim Start und alle 6 Stunden, lädt neue Versionen herunter.",
-                                       self.on_auto_update, self.cfg.get("auto_update", True))
-        ctk.CTkFrame(tools, height=6, fg_color="transparent").pack()
+            tools = self._section(inner, "Tools & Updates")
+            row = self._row(tools, "Tools", "mpv (Player) und yt-dlp (Downloads)")
+            self.tools_desc = row.desc
+            self._btn(row, "Installieren / aktualisieren", self.on_install_tools, "secondary", width=200,
+                      height=32, font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
+            row = self._row(tools, f"Wallura {APP_VERSION}", "Sucht bei GitHub nach einer neuen Version.")
+            self._btn(row, "Nach Updates suchen", lambda: self.check_updates(True), "secondary", width=200,
+                      height=32, font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
+            self.sw_upd = self._switch_row(tools, "Updates automatisch laden",
+                                           "Prüft beim Start und alle 6 Stunden, lädt neue Versionen herunter.",
+                                           self.on_auto_update, self.cfg.get("auto_update", True))
+            ctk.CTkFrame(tools, height=6, fg_color="transparent").pack()
+
+            self._users_box = self._section(inner, "Benutzer")
+            row = self._row(self._users_box, "Konten",
+                            "Wer sich anmelden darf und wer Adminrechte hat (nur Administratoren).")
+            self._btn(row, "Neues Konto", self.add_user, "secondary", width=140, height=32,
+                      font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
+            self._user_rows = ctk.CTkFrame(self._users_box, fg_color="transparent")
+            self._user_rows.pack(fill="x", padx=18, pady=(4, 0))
+            ctk.CTkFrame(self._users_box, height=6, fg_color="transparent").pack()
+            self._refresh_users()
 
         data = self._section(inner, "Daten")
         row = self._row(data, "Datenordner", f"{DATA_DIR}\nEinstellungen, Downloads, Vorschaubilder und mpv-Logs")
@@ -1666,8 +2023,13 @@ class App(ctk.CTk):
 
     def _show_update_bar(self, info, path):
         self.update_file = path
-        self.upd_label.configure(text=f"Update v{info['version']} ist bereit.")
-        self.upd_btn.configure(text="Jetzt installieren", command=self.install_update)
+        if self.is_admin:
+            self.upd_label.configure(text=f"Update v{info['version']} ist bereit.")
+            self.upd_btn.configure(text="Jetzt installieren", command=self.install_update)
+        else:  # Installation ist Administratoren vorbehalten
+            self.upd_label.configure(text=f"Update v{info['version']} ist bereit – ein Administrator kann "
+                                          "es installieren.")
+            self.upd_btn.pack_forget()
         self.upd_frame.pack(fill="x", padx=6, pady=(0, 8))
         self.set_status(f"Update v{info['version']} heruntergeladen.")
         self._show_update_toast(info)
@@ -1712,8 +2074,11 @@ class App(ctk.CTk):
             close()
             self.install_update()
 
-        self._btn(btns, "Jetzt installieren", install, "primary", height=34, width=150).pack(side="left")
-        self._btn(btns, "Später", close, "ghost", height=34, width=80).pack(side="left", padx=(8, 0))
+        if self.is_admin:
+            self._btn(btns, "Jetzt installieren", install, "primary", height=34, width=150).pack(side="left")
+            self._btn(btns, "Später", close, "ghost", height=34, width=80).pack(side="left", padx=(8, 0))
+        else:
+            self._btn(btns, "OK", close, "primary", height=34, width=100).pack(side="left")
 
         t.update_idletasks()
         w, h = t.winfo_reqwidth(), t.winfo_reqheight()
@@ -1728,6 +2093,8 @@ class App(ctk.CTk):
         t.attributes("-topmost", True)
 
     def install_update(self):
+        if not self._require_admin():
+            return
         path = self.update_file
         if not path or not Path(path).exists():
             return
@@ -1780,6 +2147,9 @@ class App(ctk.CTk):
             self.set_status(f"Autostart ging nicht: {e}", True)
 
     def on_install_tools(self):
+        if not self._require_admin():
+            return
+
         def work():
             msg = install_tools(lambda s: self.ui(lambda: self.set_status(s)))
             self.ui(lambda: (self.set_status(msg), self._update_tools_banner()))
@@ -1797,13 +2167,149 @@ class App(ctk.CTk):
             self.banner_frame.pack(fill="x", pady=(0, 8))
         else:
             self.banner_frame.pack_forget()
-        self.tools_desc.configure(text="  ·  ".join(f"{n}: {'gefunden' if ok else 'fehlt'}" for n, ok in found.items()))
+        if not self.is_admin and missing:
+            self.banner.configure(text="Fehlt noch: " + ", ".join(missing)
+                                  + " – ein Administrator muss die Tools installieren.")
+        if self.tools_desc is not None:
+            self.tools_desc.configure(text="  ·  ".join(f"{n}: {'gefunden' if ok else 'fehlt'}" for n, ok in found.items()))
 
     def open_data_dir(self):
         try:
             os.startfile(str(DATA_DIR))
         except Exception as e:
             self.set_status(f"Ordner ließ sich nicht öffnen: {e}", True)
+
+    # -- Konto & Benutzer
+    def _form(self, title, fields, subtitle=None, ok_text="Speichern"):
+        d = FormDialog(self, title, fields, subtitle, ok_text)
+        d.wait_window()
+        return d.result
+
+    def logout(self):
+        self.logout_requested = True
+        self.player.shutdown()
+        try:
+            self.tray.stop()
+        except Exception:
+            pass
+        self.destroy()
+
+    def change_password(self):
+        res = self._form("Passwort ändern", [
+            {"key": "old", "label": "Aktuelles Passwort", "type": "pw"},
+            {"key": "new", "label": "Neues Passwort", "type": "pw"},
+            {"key": "new2", "label": "Neues Passwort wiederholen", "type": "pw"},
+        ], None, "Speichern")
+        if res is None:
+            return
+        self.acc = load_accounts()
+        user = find_account(self.acc, self.user.get("name", ""))
+        if not user or not _password_ok(res["old"], user.get("pw")):
+            self.set_status("Das aktuelle Passwort ist falsch.", True)
+            return
+        if res["new"] != res["new2"]:
+            self.set_status("Die neuen Passwörter sind nicht gleich.", True)
+            return
+        ok, err = set_password(self.acc, self.user.get("name"), res["new"])
+        self.set_status("Passwort geändert." if ok else err, not ok)
+
+    def add_user(self):
+        if not self._require_admin():
+            return
+        res = self._form("Neues Konto", [
+            {"key": "name", "label": "Benutzername", "type": "text"},
+            {"key": "pw", "label": "Passwort", "type": "pw"},
+            {"key": "role", "label": "Rolle", "type": "menu",
+             "values": [ROLES["user"], ROLES["admin"]], "value": ROLES["user"]},
+        ], "Das Konto kann sich ab sofort bei Wallura anmelden.", "Konto anlegen")
+        if res is None:
+            return
+        role = "admin" if res["role"] == ROLES["admin"] else "user"
+        self.acc = load_accounts()
+        ok, err = create_account(self.acc, res["name"], res["pw"], role)
+        self.set_status(f"Konto „{res['name'].strip()}“ angelegt." if ok else err, not ok)
+        self._refresh_users()
+
+    def reset_user_password(self, key):
+        if not self._require_admin():
+            return
+        self.acc = load_accounts()
+        user = self.acc["users"].get(key)
+        if not user:
+            return
+        res = self._form("Passwort zurücksetzen", [
+            {"key": "pw", "label": "Neues Passwort", "type": "pw"},
+            {"key": "pw2", "label": "Neues Passwort wiederholen", "type": "pw"},
+        ], f"Neues Passwort für „{user.get('name', key)}“.", "Speichern")
+        if res is None:
+            return
+        if res["pw"] != res["pw2"]:
+            self.set_status("Die Passwörter sind nicht gleich.", True)
+            return
+        ok, err = set_password(self.acc, key, res["pw"])
+        self.set_status("Passwort geändert." if ok else err, not ok)
+
+    def toggle_role(self, key):
+        if not self._require_admin():
+            return
+        if key == str(self.user.get("name", "")).lower():
+            self.set_status("Die eigene Rolle lässt sich nicht ändern.", True)
+            return
+        self.acc = load_accounts()
+        user = self.acc["users"].get(key)
+        if not user:
+            return
+        new_role = "user" if user.get("role") == "admin" else "admin"
+        ok, err = set_role(self.acc, key, new_role)
+        self.set_status(f"„{user.get('name', key)}“ ist jetzt {ROLES[new_role]}." if ok else err, not ok)
+        self._refresh_users()
+
+    def remove_user(self, key):
+        if not self._require_admin():
+            return
+        if key == str(self.user.get("name", "")).lower():
+            self.set_status("Das eigene Konto lässt sich nicht löschen.", True)
+            return
+        self.acc = load_accounts()
+        user = self.acc["users"].get(key)
+        if not user:
+            return
+        if self._form("Konto löschen", [],
+                      f"„{user.get('name', key)}“ endgültig löschen? Das Konto kann sich danach nicht "
+                      "mehr anmelden.", "Löschen") is None:
+            return
+        ok, err = delete_account(self.acc, key)
+        self.set_status(f"Konto „{user.get('name', key)}“ gelöscht." if ok else err, not ok)
+        self._refresh_users()
+
+    def _refresh_users(self):
+        if not self.is_admin:
+            return
+        for w in self._user_rows.winfo_children():
+            w.destroy()
+        self.acc = load_accounts()
+        own = str(self.user.get("name", "")).lower()
+        for key, user in sorted(self.acc["users"].items(), key=lambda kv: kv[1].get("name", kv[0]).lower()):
+            row = ctk.CTkFrame(self._user_rows, fg_color=SURFACE2, corner_radius=12,
+                               border_width=1, border_color=BORDER)
+            row.pack(fill="x", pady=4)
+            row.grid_columnconfigure(0, weight=1)
+            info = ctk.CTkFrame(row, fg_color="transparent")
+            info.grid(row=0, column=0, sticky="w", padx=14, pady=8)
+            ctk.CTkLabel(info, text=user.get("name", key) + ("  (du)" if key == own else ""),
+                         font=self._font(13, "bold"), text_color=TEXT, anchor="w").pack(anchor="w")
+            ctk.CTkLabel(info, text=ROLES.get(user.get("role"), "Nutzer"), font=self._font(11),
+                         text_color=ACCENT if user.get("role") == "admin" else MUTED,
+                         anchor="w").pack(anchor="w")
+            btns = ctk.CTkFrame(row, fg_color="transparent")
+            btns.grid(row=0, column=1, sticky="e", padx=10, pady=8)
+            role_text = "Zum Nutzer" if user.get("role") == "admin" else "Zum Admin"
+            self._btn(btns, role_text, lambda k=key: self.toggle_role(k), "ghost", width=104, height=28,
+                      font=self._font(11)).pack(side="left", padx=2)
+            self._btn(btns, "Passwort", lambda k=key: self.reset_user_password(k), "ghost", width=88,
+                      height=28, font=self._font(11)).pack(side="left", padx=2)
+            self._btn(btns, "Löschen", lambda k=key: self.remove_user(k), "danger", width=84, height=28,
+                      font=self._font(11)).pack(side="left", padx=2)
 
     # -- Tray
     def _setup_tray(self):
@@ -1812,7 +2318,8 @@ class App(ctk.CTk):
             pystray.MenuItem(lambda item: "Fortsetzen" if self.player.paused_manual else "Pause",
                              lambda: self.ui(self.toggle_pause)),
             pystray.MenuItem(lambda item: f"Update v{(self.update_info or {}).get('version', '')} installieren",
-                             lambda: self.ui(self.install_update), visible=lambda item: bool(self.update_file)),
+                             lambda: self.ui(self.install_update),
+                             visible=lambda item: bool(self.update_file) and self.is_admin),
             pystray.MenuItem("Nächstes Wallpaper", lambda: self.ui(self.next_wallpaper)),
             pystray.MenuItem("Wallpaper stoppen", lambda: self.ui(self.stop_wallpaper)),
             pystray.Menu.SEPARATOR,
@@ -1849,8 +2356,15 @@ def main():
     migrate_autostart()
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
-    app = App(start_hidden="--minimized" in sys.argv)
-    app.mainloop()
+    start_hidden = "--minimized" in sys.argv
+    while True:  # Anmelden -> Wallura -> (Abmelden -> wieder Anmelden) oder Ende
+        session = LoginWindow().run()
+        if not session:
+            break
+        app = App(session=session, start_hidden=start_hidden)
+        app.mainloop()
+        if not getattr(app, "logout_requested", False):
+            break
     del mutex
 
 
