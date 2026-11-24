@@ -128,25 +128,89 @@ MENU_STYLE = dict(fg_color=SURFACE2, button_color=BORDER, button_hover_color="#3
 
 
 # ----------------------------------------------------------------------------- Config
+_CONFIG_LOCK = threading.Lock()
+
+
+def _write_json(path, data):
+    """Schreibt JSON atomar (erst .tmp, dann ersetzen), damit bei einem Absturz keine halbe Datei bleibt."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with _CONFIG_LOCK:
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+
+
+def _as_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on", "ja")
+    return default
+
+
+def _clean_item(item):
+    """Prüft einen Bibliothekseintrag aus der Config. -> bereinigtes dict oder None."""
+    if not isinstance(item, dict):
+        return None
+    iid, src = item.get("id"), item.get("src")
+    if not isinstance(iid, str) or not iid or not isinstance(src, str) or not src.strip():
+        return None
+    kind = item.get("kind") if item.get("kind") in KIND_LABEL else detect_kind(src)
+    title = item.get("title")
+    if not isinstance(title, str) or not title.strip():
+        title = src
+    clean = dict(item)
+    clean.update({"id": iid, "src": src, "kind": kind, "title": title})
+    return clean
+
+
 def load_config():
     cfg = dict(DEFAULTS)
     try:
-        cfg.update(json.loads(CONFIG_FILE.read_text(encoding="utf-8")))
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            cfg.update(data)
     except Exception:
         pass
+    # Ungültige oder alte Werte reparieren, damit ein kaputter Eintrag nicht den Start verhindert.
+    raw_items = cfg.get("items")
+    cfg["items"] = [it for it in (_clean_item(i) for i in raw_items) if it] if isinstance(raw_items, list) else []
     if DATA_DIR.exists() and not _OLD_DIR.exists():  # Pfade heruntergeladener Dateien auf den neuen Ordner umbiegen
         old = str(_OLD_DIR)
-        for it in cfg.get("items", []):
-            if isinstance(it.get("src"), str) and it["src"].startswith(old):
-                it["src"] = str(DATA_DIR) + it["src"][len(old):]
+        for it in cfg["items"]:
+            src = it["src"]
+            if src == old or src.startswith(old + os.sep):
+                it["src"] = str(DATA_DIR) + src[len(old):]
+    raw_assign = cfg.get("assign")
+    cfg["assign"] = ({str(k): v for k, v in raw_assign.items() if str(k).isdigit() and isinstance(v, str)}
+                     if isinstance(raw_assign, dict) else {})
+    if cfg.get("fit") not in FIT_MAP.values():
+        cfg["fit"] = DEFAULTS["fit"]
+    try:
+        cfg["volume"] = max(0, min(100, int(cfg.get("volume", 0))))
+    except (TypeError, ValueError):
+        cfg["volume"] = DEFAULTS["volume"]
+    quality = str(cfg.get("quality", ""))
+    cfg["quality"] = quality if quality in QUALITIES else DEFAULTS["quality"]
+    try:
+        fps = int(cfg.get("fps_limit", DEFAULTS["fps_limit"]))
+    except (TypeError, ValueError):
+        fps = DEFAULTS["fps_limit"]
+    cfg["fps_limit"] = fps if fps in FPS_MAP.values() else DEFAULTS["fps_limit"]
+    cfg["monitor"] = str(cfg.get("monitor") or "all")
+    cfg["update_repo"] = cfg["update_repo"] if isinstance(cfg.get("update_repo"), str) else ""
+    for key in ("pause_fullscreen", "autostart", "auto_update"):
+        cfg[key] = _as_bool(cfg.get(key), DEFAULTS[key])
     return cfg
 
 
 def save_config(cfg):
     try:
-        CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+        _write_json(CONFIG_FILE, cfg)
+        return True
     except Exception:
-        pass
+        return False
 
 
 # ----------------------------------------------------------------------------- Konten
@@ -173,14 +237,30 @@ def load_accounts():
         data = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
     except Exception:
         pass
-    if not isinstance(data, dict) or not isinstance(data.get("users"), dict):
-        data = {"users": {}}
-    return data
+    raw = data.get("users") if isinstance(data, dict) else None
+    users = {}
+    for key, user in (raw if isinstance(raw, dict) else {}).items():
+        if not isinstance(user, dict) or not isinstance(user.get("pw"), str):
+            continue
+        key = str(key).strip().lower()
+        if not key:
+            continue
+        name = user.get("name")
+        users[key] = {"name": name if isinstance(name, str) and name.strip() else key,
+                      "pw": user["pw"],
+                      "role": "admin" if user.get("role") == "admin" else "user",
+                      "created": user.get("created") if isinstance(user.get("created"), int) else 0}
+    if users and not any(u["role"] == "admin" for u in users.values()):
+        # Ohne Administrator könnte niemand mehr Tools, Updates oder Benutzer verwalten
+        # (aus der App heraus nicht mehr reparierbar) -> das älteste Konto übernimmt die Rolle.
+        oldest = min(users.items(), key=lambda kv: (kv[1]["created"], kv[0]))[0]
+        users[oldest]["role"] = "admin"
+    return {"users": users}
 
 
 def save_accounts(acc):
     try:
-        ACCOUNTS_FILE.write_text(json.dumps(acc, indent=2, ensure_ascii=False), encoding="utf-8")
+        _write_json(ACCOUNTS_FILE, acc)
         return True
     except Exception:
         return False
@@ -203,9 +283,12 @@ def create_account(acc, name, pw, role="user"):
         return False, f"Das Passwort braucht mindestens {MIN_PW_LEN} Zeichen."
     if name.lower() in acc["users"]:
         return False, "Diesen Benutzernamen gibt es schon."
-    acc["users"][name.lower()] = {"name": name, "pw": _hash_password(pw), "role": role,
-                                   "created": int(time.time())}
+    if role not in ROLES:
+        return False, "Unbekannte Rolle."
+    entry = {"name": name, "pw": _hash_password(pw), "role": role, "created": int(time.time())}
+    acc["users"][name.lower()] = entry
     if not save_accounts(acc):
+        acc["users"].pop(name.lower(), None)
         return False, "Die Konten-Datei ließ sich nicht speichern."
     return True, ""
 
@@ -227,8 +310,11 @@ def set_password(acc, name, pw):
         return False, "Konto nicht gefunden."
     if len(str(pw)) < MIN_PW_LEN:
         return False, f"Das Passwort braucht mindestens {MIN_PW_LEN} Zeichen."
+    old = user.get("pw")
     user["pw"] = _hash_password(pw)
-    save_accounts(acc)
+    if not save_accounts(acc):
+        user["pw"] = old
+        return False, "Die Konten-Datei ließ sich nicht speichern."
     return True, ""
 
 
@@ -236,10 +322,15 @@ def set_role(acc, name, role):
     user = find_account(acc, name)
     if not user:
         return False, "Konto nicht gefunden."
+    if role not in ROLES:
+        return False, "Unbekannte Rolle."
     if user.get("role") == "admin" and role != "admin" and admin_count(acc) <= 1:
         return False, "Der letzte Administrator kann nicht herabgestuft werden."
+    old = user.get("role")
     user["role"] = role
-    save_accounts(acc)
+    if not save_accounts(acc):
+        user["role"] = old
+        return False, "Die Konten-Datei ließ sich nicht speichern."
     return True, ""
 
 
@@ -249,8 +340,12 @@ def delete_account(acc, name):
         return False, "Konto nicht gefunden."
     if user.get("role") == "admin" and admin_count(acc) <= 1:
         return False, "Der letzte Administrator kann nicht gelöscht werden."
-    acc["users"].pop(str(name).strip().lower(), None)
-    save_accounts(acc)
+    key = str(name).strip().lower()
+    removed = acc["users"].pop(key, None)
+    if not save_accounts(acc):
+        if removed is not None:
+            acc["users"][key] = removed
+        return False, "Die Konten-Datei ließ sich nicht speichern."
     return True, ""
 
 
@@ -376,18 +471,23 @@ def download_item(item, quality, progress):
     if is_direct_media(url):
         ext = Path(urllib.parse.urlparse(url).path).suffix or ".mp4"
         dest, tmp = LIB_DIR / f"{item['id']}{ext}", LIB_DIR / f"{item['id']}.part"
-        with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=30) as r, open(tmp, "wb") as f:
-            total = int(r.headers.get("Content-Length") or 0)
-            done = 0
-            while True:
-                chunk = r.read(1 << 16)
-                if not chunk:
-                    break
-                f.write(chunk)
-                done += len(chunk)
-                if total:
-                    progress(done * 100 / total)
-        tmp.replace(dest)
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=30) as r, \
+                    open(tmp, "wb") as f:
+                total = int(r.headers.get("Content-Length") or 0)
+                done = 0
+                while True:
+                    chunk = r.read(1 << 16)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    if total:
+                        progress(done * 100 / total)
+            tmp.replace(dest)
+        except BaseException:
+            tmp.unlink(missing_ok=True)  # keine halbe Datei im Download-Ordner zurücklassen
+            raise
         return dest
 
     ytdlp = find_tool("yt-dlp")
@@ -414,6 +514,9 @@ def download_item(item, quality, progress):
     proc.wait()
     files = [p for p in LIB_DIR.glob(f"{item['id']}.*") if p.suffix not in (".part", ".ytdl")]
     if proc.returncode != 0 or not files:
+        for p in LIB_DIR.glob(f"{item['id']}.*"):
+            if p.suffix in (".part", ".ytdl"):
+                p.unlink(missing_ok=True)
         raise RuntimeError(last or "Download fehlgeschlagen")
     return max(files, key=lambda p: p.stat().st_mtime)
 
@@ -421,14 +524,15 @@ def download_item(item, quality, progress):
 def install_tools(say):
     """yt-dlp direkt von GitHub laden, mpv über winget installieren (falls es fehlt)."""
     msgs = []
+    tmp = TOOLS_USER / "yt-dlp.exe.tmp"
     try:
         say("Lade yt-dlp …")
         data = http_get("https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe", timeout=180)
-        tmp = TOOLS_USER / "yt-dlp.exe.tmp"
         tmp.write_bytes(data)
         tmp.replace(TOOLS_USER / "yt-dlp.exe")
         msgs.append("yt-dlp aktualisiert")
     except Exception as e:
+        tmp.unlink(missing_ok=True)
         msgs.append(f"yt-dlp-Download fehlgeschlagen ({e})")
     if not find_tool("mpv"):
         for pkg in ("shinchiro.mpv", "mpv"):
@@ -501,13 +605,15 @@ def download_update(info, progress):
 
 def cleanup_old_updates():
     """Löscht alte / halbfertige Installer aus dem Update-Ordner."""
-    try:
-        for p in UPDATE_DIR.glob("*"):
+    for p in UPDATE_DIR.glob("*"):
+        if p.is_dir():  # unlink() würde hier scheitern und das Aufräumen komplett abbrechen
+            continue
+        try:
             m = re.search(r"Setup-([\d.]+)\.exe$", p.name)
             if p.suffix == ".part" or (m and parse_version(m.group(1)) <= parse_version(APP_VERSION)):
                 p.unlink(missing_ok=True)
-    except Exception:
-        pass
+        except OSError:
+            pass
 
 
 # ----------------------------------------------------------------------------- Windows-Desktop-Magie
@@ -551,6 +657,8 @@ def get_wallpaper_parent():
 def embed(hwnd, rect):
     """Hängt das mpv-Fenster hinter die Desktop-Icons und positioniert es auf dem Monitor."""
     parent, progman_mode = get_wallpaper_parent()
+    if not parent:  # Explorer startet gerade neu / Desktop noch nicht bereit
+        raise RuntimeError("Desktop (Progman) nicht gefunden")
     style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
     style &= ~(win32con.WS_POPUP | win32con.WS_CAPTION | win32con.WS_THICKFRAME | win32con.WS_SYSMENU
                | win32con.WS_MINIMIZEBOX | win32con.WS_MAXIMIZEBOX | win32con.WS_BORDER | win32con.WS_DLGFRAME)
@@ -828,9 +936,8 @@ class Player:
             self._add_to_job(proc)
             new[idx] = {"proc": proc, "pipe": pipe, "rect": mons[idx]["rect"], "hwnd": None, "log": log, "item": item}
 
-        deadline = time.time() + 30
         for idx, inst in new.items():
-            hwnd = self._find_window(inst["proc"], deadline)
+            hwnd = self._find_window(inst["proc"], time.time() + 30)
             if not hwnd:
                 tail = ""
                 try:
@@ -914,6 +1021,8 @@ class Player:
             insts = dict(self.instances)
             if not insts:
                 continue
+            for gone in [i for i in list(self._restarts) if i not in insts]:
+                self._restarts.pop(gone, None)  # alte Neustart-Zähler beendeter Monitore vergessen
             self._tick += 1
             now = time.time()
             for idx, inst in insts.items():
@@ -1008,6 +1117,7 @@ class LoginWindow(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.result = None
+        self._done = False
         self.acc = load_accounts()
         self.setup_mode = not has_accounts(self.acc)  # erster Start: Admin-Konto anlegen
         self.title("Wallura – Konto einrichten" if self.setup_mode else "Wallura – Anmelden")
@@ -1064,6 +1174,8 @@ class LoginWindow(ctk.CTk):
         return e
 
     def submit(self):
+        if self._done:
+            return
         name, pw = self.e_name.get().strip(), self.e_pw.get()
         if not name or not pw:
             self.err.configure(text="Bitte Name und Passwort eingeben.")
@@ -1076,16 +1188,25 @@ class LoginWindow(ctk.CTk):
             if not ok:
                 self.err.configure(text=err)
                 return
-            self.result = find_account(self.acc, name)
+            user = find_account(self.acc, name)
+            self._finish({"name": user.get("name", name), "role": user.get("role", "admin")})
         else:
             user = authenticate(self.acc, name, pw)
             if not user:
                 self.err.configure(text="Name oder Passwort ist falsch.")
                 return
-            self.result = user
+            # Passwort-Hash bewusst nicht in die Sitzung übernehmen
+            self._finish({"name": user.get("name", name), "role": user.get("role", "user")})
+
+    def _finish(self, session):
+        self._done = True
+        self.result = session
         self.destroy()
 
     def cancel(self):
+        if self._done:
+            return
+        self._done = True
         self.result = None
         self.destroy()
 
@@ -1209,11 +1330,18 @@ class App(ctk.CTk):
         self.update_file = None
         self.player = Player(self.cfg, on_error=lambda m: self.ui(lambda: self.set_status(m, True)))
         self.tray = None
+        self._closing = False
+        self._volume_job = None
+        self._downloads = set()
+        self._update_lock = threading.Lock()
 
         self._build_ui()
         self.refresh_library()
         self._update_tools_banner()
-        self._setup_tray()
+        try:
+            self._setup_tray()
+        except Exception:
+            self.tray = None  # ohne Tray darf das Schließen das Fenster nicht unerreichbar machen
         self.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
         self.bind("<Configure>", self._on_resize)
         self.after(100, self._poll)
@@ -1518,7 +1646,7 @@ class App(ctk.CTk):
         row = self._row(play, "Anpassung", "Wie das Video auf den Monitor gelegt wird.")
         self.fit_menu = ctk.CTkOptionMenu(row, values=list(FIT_MAP), command=self.on_fit, width=200,
                                           **self._menu_style())
-        self.fit_menu.set(next(k for k, v in FIT_MAP.items() if v == self.cfg["fit"]))
+        self.fit_menu.set(next((k for k, v in FIT_MAP.items() if v == self.cfg["fit"]), list(FIT_MAP)[0]))
         self.fit_menu.grid(row=0, column=1, sticky="e", padx=(16, 0))
         row = self._row(play, "Max. FPS", "Weniger Bilder pro Sekunde sparen Leistung und Akku.")
         self.fps_menu = ctk.CTkOptionMenu(row, values=list(FPS_MAP), command=self.on_fps, width=200,
@@ -1850,7 +1978,6 @@ class App(ctk.CTk):
         threading.Thread(target=lambda: (self.player.apply(self._assign_items(a)), self.ui(self.refresh_library)),
                          daemon=True).start()
         self.set_status(msg)
-        self.refresh_library()
 
     def restart_current(self):
         if self.player.active:
@@ -1872,24 +1999,33 @@ class App(ctk.CTk):
 
     # -- Download
     def download(self, item):
+        if item["id"] in self._downloads:
+            self.set_status("Für dieses Wallpaper läuft schon ein Download.", True)
+            return
+        self._downloads.add(item["id"])
         self.set_status(f"Lade „{shorten(item['title'], 40)}“ herunter …")
         self.progress.set(0)
         threading.Thread(target=self._download_worker, args=(item,), daemon=True).start()
 
     def _download_worker(self, item):
         try:
-            path = download_item(item, self.cfg["quality"], lambda p: self.ui(lambda: self.progress.set(p / 100)))
-        except Exception as e:
-            msg = f"Download fehlgeschlagen: {e}"
-            self.ui(lambda: (self.set_status(msg, True), self.progress.set(0)))
-            return
-        item["origin"] = item["src"]
-        item["kind"], item["src"] = "local", str(path)
-        save_config(self.cfg)
-        if not (THUMB_DIR / f"{item['id']}.jpg").exists():
-            make_local_thumb(item["id"], path)
-        self.ui(lambda: (self.progress.set(1), self.set_status(f"Heruntergeladen: {path.name} (offline nutzbar)"),
-                         self.refresh_library()))
+            try:
+                path = download_item(item, self.cfg["quality"],
+                                     lambda p: self.ui(lambda: self.progress.set(p / 100)))
+            except Exception as e:
+                msg = f"Download fehlgeschlagen: {e}"
+                self.ui(lambda: (self.set_status(msg, True), self.progress.set(0)))
+                return
+            item["origin"] = item["src"]
+            item["kind"], item["src"] = "local", str(path)
+            save_config(self.cfg)
+            if not (THUMB_DIR / f"{item['id']}.jpg").exists():
+                make_local_thumb(item["id"], path)
+            self.ui(lambda: (self.progress.set(1),
+                             self.set_status(f"Heruntergeladen: {path.name} (offline nutzbar)"),
+                             self.refresh_library()))
+        finally:
+            self._downloads.discard(item["id"])
 
     # -- Monitor-Auswahl mit Vorschau
     def _monitor_preview(self):
@@ -1990,6 +2126,16 @@ class App(ctk.CTk):
         threading.Thread(target=self._update_worker, args=(manual,), daemon=True).start()
 
     def _update_worker(self, manual):
+        if not self._update_lock.acquire(blocking=False):
+            if manual:
+                self.ui(lambda: self.set_status("Eine Update-Prüfung läuft bereits.", True))
+            return
+        try:
+            self._check_update(manual)
+        finally:
+            self._update_lock.release()
+
+    def _check_update(self, manual):
         def say(text, error=False):
             if manual:
                 self.ui(lambda: self.set_status(text, error))
@@ -2113,9 +2259,16 @@ class App(ctk.CTk):
 
     # -- Einstellungen
     def on_volume(self, v):
-        self.vol_lbl.configure(text=f"{int(v)} %")
-        self.cfg["volume"] = int(v)
-        self.player.set_volume(int(v))
+        vol = max(0, min(100, int(round(float(v)))))
+        self.vol_lbl.configure(text=f"{vol} %")
+        self.cfg["volume"] = vol
+        self.player.set_volume(vol)
+        if self._volume_job is not None:  # nicht bei jedem Pixel der Leiste auf die Platte schreiben
+            self.after_cancel(self._volume_job)
+        self._volume_job = self.after(400, self._save_volume)
+
+    def _save_volume(self):
+        self._volume_job = None
         save_config(self.cfg)
 
     def on_fit(self, label):
@@ -2186,6 +2339,9 @@ class App(ctk.CTk):
         return d.result
 
     def logout(self):
+        if self._closing:
+            return
+        self._closing = True
         self.logout_requested = True
         self.player.shutdown()
         try:
@@ -2289,14 +2445,19 @@ class App(ctk.CTk):
             w.destroy()
         self.acc = load_accounts()
         own = str(self.user.get("name", "")).lower()
-        for key, user in sorted(self.acc["users"].items(), key=lambda kv: kv[1].get("name", kv[0]).lower()):
+
+        def by_name(kv):
+            return str(kv[1].get("name") or kv[0]).lower()
+
+        for key, user in sorted(self.acc["users"].items(), key=by_name):
+            name = str(user.get("name") or key)
             row = ctk.CTkFrame(self._user_rows, fg_color=SURFACE2, corner_radius=12,
                                border_width=1, border_color=BORDER)
             row.pack(fill="x", pady=4)
             row.grid_columnconfigure(0, weight=1)
             info = ctk.CTkFrame(row, fg_color="transparent")
             info.grid(row=0, column=0, sticky="w", padx=14, pady=8)
-            ctk.CTkLabel(info, text=user.get("name", key) + ("  (du)" if key == own else ""),
+            ctk.CTkLabel(info, text=name + ("  (du)" if key == own else ""),
                          font=self._font(13, "bold"), text_color=TEXT, anchor="w").pack(anchor="w")
             ctk.CTkLabel(info, text=ROLES.get(user.get("role"), "Nutzer"), font=self._font(11),
                          text_color=ACCENT if user.get("role") == "admin" else MUTED,
@@ -2334,9 +2495,15 @@ class App(ctk.CTk):
         self.focus_force()
 
     def hide_to_tray(self):
-        self.withdraw()
+        if self.tray is None:
+            self.quit_app()  # kein Tray-Symbol -> sonst wäre das Fenster nicht mehr erreichbar
+        else:
+            self.withdraw()
 
     def quit_app(self):
+        if self._closing:
+            return
+        self._closing = True
         self.player.shutdown()
         try:
             self.tray.stop()
@@ -2357,13 +2524,16 @@ def main():
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
     start_hidden = "--minimized" in sys.argv
+    first_session = True
     while True:  # Anmelden -> Wallura -> (Abmelden -> wieder Anmelden) oder Ende
         session = LoginWindow().run()
         if not session:
             break
-        app = App(session=session, start_hidden=start_hidden)
+        # Nur der Autostart-Start ist versteckt; nach „Abmelden“ soll das Fenster sichtbar sein.
+        app = App(session=session, start_hidden=start_hidden and first_session)
+        first_session = False
         app.mainloop()
-        if not getattr(app, "logout_requested", False):
+        if not app.logout_requested:
             break
     del mutex
 
