@@ -1152,7 +1152,8 @@ local function draw()
     local t = os.date("*t")
     local lines = {}
     if CFG.clock then
-        lines[#lines + 1] = {os.date("%H:%M", t), CFG.size, true}
+        -- os.date mit Tabellen-Argument ist in Lua ein Fehler -> Uhr aus den Feldern bauen
+        lines[#lines + 1] = {string.format("%02d:%02d", t.hour, t.min), CFG.size, true}
     end
     local sub = math.max(13, math.floor(CFG.size * 0.36))
     if CFG.date then
@@ -1198,10 +1199,35 @@ local function draw()
     mp.command_native({name = "osd-overlay", id = "wallura-desk", format = "ass-events",
                        data = table.concat(events, "\n"), res_x = CFG.w, res_y = CFG.h})
 end
-draw()
-mp.add_periodic_timer(1.0, draw)
-mp.register_event("file-loaded", draw)
+local function safe_draw()
+    local ok, err = pcall(draw)
+    if not ok then mp.msg.error("Wallura-Uhr: " .. tostring(err)) end
+end
+safe_draw()
+mp.add_periodic_timer(1.0, safe_draw)
+mp.register_event("file-loaded", safe_draw)
 '''
+
+
+def desk_lua_string(value):
+    """Python-Text als gültiges Lua-String-Literal (JSON ist kein Lua!)."""
+    out = []
+    for ch in str(value):
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ord(ch) < 32:
+            out.append(" ")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
 
 
 def desk_lua_source(desk, w, h):
@@ -1215,7 +1241,10 @@ def desk_lua_source(desk, w, h):
         "w": int(w),
         "h": int(h),
     }
-    return "local CFG = " + json.dumps(cfg, ensure_ascii=False) + "\n" + DESK_LUA_BODY
+    header = "local CFG = {" + ", ".join(
+        f"{key} = {desk_lua_string(val) if isinstance(val, str) else ('true' if val is True else 'false' if val is False else int(val))}"
+        for key, val in cfg.items()) + "}"
+    return header + "\n" + DESK_LUA_BODY
 
 
 def desk_script(desk, w, h):
