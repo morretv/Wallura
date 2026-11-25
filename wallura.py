@@ -40,7 +40,7 @@ import win32gui
 import win32job
 import win32process
 import winerror
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageTk
 
 # ----------------------------------------------------------------------------- Pfade
 APP_NAME = "Wallura"
@@ -79,21 +79,24 @@ for _d in (DATA_DIR, LIB_DIR, THUMB_DIR, TOOLS_USER, UPDATE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 CREATE_NO_WINDOW = 0x08000000
-ACCENT = "#4cc2ff"
-ACCENT_HOVER = "#79d2ff"
-ACCENT_DIM = "#2d7fa8"
-ON_ACCENT = "#06202e"
-BG = "#0d0f13"
-SURFACE = "#15181e"
-SURFACE2 = "#1c2028"
-BORDER = "#2a303a"
-TEXT = "#e9edf2"
-MUTED = "#8a93a2"
-DANGER_TEXT = "#ff8a8e"
+ACCENT = "#5cc8ff"
+ACCENT_HOVER = "#8adcff"
+ACCENT_DIM = "#2d7d9d"
+ON_ACCENT = "#041e2a"
+BG = "#08090d"
+SURFACE = "#111319"
+SURFACE2 = "#191c24"
+SURFACE3 = "#20242e"
+BORDER = "#262b36"
+TEXT = "#f3f5f9"
+MUTED = "#8d96a8"
+DANGER_TEXT = "#ff8f94"
 FONT = "Segoe UI"
-STATUS_OK = "#c3cad5"
-STATUS_ERR = "#ff7b7b"
-SIDEBAR_W = 240
+STATUS_OK = "#c9d1dd"
+STATUS_ERR = "#ff8489"
+SIDEBAR_W = 252
+CARD_RADIUS = 18
+BTN_RADIUS = 11
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Wallura"}
 
 VIDEO_EXT = (".mp4", ".webm", ".mkv", ".mov", ".avi", ".m4v", ".gif")
@@ -151,9 +154,9 @@ def ui_font(size=13, weight="normal"):
     return ctk.CTkFont(family=FONT, size=size, weight=weight)
 
 
-MENU_STYLE = dict(fg_color=SURFACE2, button_color=BORDER, button_hover_color="#3a4150",
-                  dropdown_fg_color=SURFACE2, dropdown_hover_color=BORDER, dropdown_text_color=TEXT,
-                  text_color=TEXT, corner_radius=8, height=32)
+MENU_STYLE = dict(fg_color=SURFACE2, button_color=SURFACE3, button_hover_color=BORDER,
+                  dropdown_fg_color=SURFACE2, dropdown_hover_color=SURFACE3, dropdown_text_color=TEXT,
+                  text_color=TEXT, corner_radius=10, height=34)
 
 
 # ----------------------------------------------------------------------------- Config
@@ -1328,8 +1331,8 @@ class LoginDialog(ctk.CTkToplevel):
         except Exception:
             pass
 
-        box = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=18, border_width=1, border_color=BORDER)
-        box.pack(fill="both", expand=True, padx=20, pady=20)
+        box = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=22, border_width=1, border_color=BORDER)
+        box.pack(fill="both", expand=True, padx=18, pady=18)
 
         head = ctk.CTkFrame(box, fg_color="transparent")
         head.pack(fill="x", padx=24, pady=(20, 4))
@@ -1340,8 +1343,8 @@ class LoginDialog(ctk.CTkToplevel):
             pass
         ctk.CTkLabel(head, text="Wallura", font=ui_font(20, "bold"), text_color=TEXT).pack(side="left")
 
-        ctk.CTkLabel(box, text="Konto einrichten" if self.setup_mode else "Anmelden",
-                     font=ui_font(18, "bold"), text_color=TEXT, anchor="w").pack(fill="x", padx=24, pady=(10, 2))
+        ctk.CTkLabel(box, text="Willkommen bei Wallura" if self.setup_mode else "Anmelden",
+                     font=ui_font(19, "bold"), text_color=TEXT, anchor="w").pack(fill="x", padx=26, pady=(10, 2))
         ctk.CTkLabel(box, text=(f"Das Konto ist ein normaler Nutzer. Administratorrechte hat nur das "
                                f"Besitzerkonto „{ADMIN_NAME}“ (bzw. wer von ihm zum Administrator gemacht wird)."
                                if self.setup_mode else "Bitte mit Name und Passwort anmelden. Wallpaper und "
@@ -1349,7 +1352,7 @@ class LoginDialog(ctk.CTkToplevel):
                      font=ui_font(11), text_color=MUTED, anchor="w", justify="left",
                      wraplength=340).pack(fill="x", padx=24, pady=(0, 4))
 
-        self.e_name = self._entry(box, "Benutzername")
+        self.e_name = self._entry(box, "Benutzername", placeholder="z. B. Admin")
         self.e_pw = self._entry(box, "Passwort", show="•")
         self.e_pw2 = self._entry(box, "Passwort wiederholen", show="•") if self.setup_mode else None
 
@@ -1363,24 +1366,26 @@ class LoginDialog(ctk.CTkToplevel):
                             variable=self.remember_var, font=ui_font(11), text_color=MUTED,
                             fg_color=ACCENT, hover_color=ACCENT_HOVER, border_color=BORDER,
                             checkbox_width=18, checkbox_height=18).pack(fill="x", padx=24, pady=(10, 0))
-        ctk.CTkButton(box, text="Konto erstellen" if self.setup_mode else "Anmelden", height=38,
-                      corner_radius=10, fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=ON_ACCENT,
-                      font=ui_font(13, "bold"), command=self.submit).pack(fill="x", padx=24, pady=(12, 6))
-        ctk.CTkButton(box, text="Abbrechen", height=32, corner_radius=10, fg_color="transparent",
+        ctk.CTkButton(box, text="Konto erstellen" if self.setup_mode else "Anmelden", height=40,
+                      corner_radius=BTN_RADIUS, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                      text_color=ON_ACCENT, font=ui_font(13, "bold"),
+                      command=self.submit).pack(fill="x", padx=26, pady=(14, 6))
+        ctk.CTkButton(box, text="Abbrechen", height=34, corner_radius=BTN_RADIUS, fg_color="transparent",
                       hover_color=SURFACE2, text_color=MUTED, font=ui_font(12),
-                      command=self.cancel).pack(fill="x", padx=24, pady=(0, 18))
+                      command=self.cancel).pack(fill="x", padx=26, pady=(0, 20))
 
         self.bind("<Return>", lambda e: self.submit())
         self.bind("<Escape>", lambda e: self.cancel())
         self._center(parent)
         self.after(120, self._activate)
 
-    def _entry(self, parent, label, show=""):
+    def _entry(self, parent, label, show="", placeholder=""):
         ctk.CTkLabel(parent, text=label, font=ui_font(12), text_color=TEXT, anchor="w").pack(
-            fill="x", padx=24, pady=(8, 3))
-        e = ctk.CTkEntry(parent, height=36, corner_radius=10, fg_color=SURFACE2, border_color=BORDER,
-                         text_color=TEXT, show=show, font=ui_font(13))
-        e.pack(fill="x", padx=24)
+            fill="x", padx=26, pady=(10, 4))
+        e = ctk.CTkEntry(parent, height=38, corner_radius=BTN_RADIUS, fg_color=SURFACE2,
+                         border_color=BORDER, border_width=1, text_color=TEXT, show=show,
+                         placeholder_text=placeholder, placeholder_text_color=MUTED, font=ui_font(13))
+        e.pack(fill="x", padx=26)
         return e
 
     def submit(self):
@@ -1495,13 +1500,13 @@ class FormDialog(ctk.CTkToplevel):
             self._vars[field["key"]] = var
 
         btns = ctk.CTkFrame(box, fg_color="transparent")
-        btns.pack(fill="x", padx=20, pady=(18, 18))
-        ctk.CTkButton(btns, text=ok_text, height=34, corner_radius=10, fg_color=ACCENT,
+        btns.pack(fill="x", padx=22, pady=(20, 20))
+        ctk.CTkButton(btns, text=ok_text, height=38, corner_radius=BTN_RADIUS, fg_color=ACCENT,
                       hover_color=ACCENT_HOVER, text_color=ON_ACCENT, font=ui_font(13, "bold"),
-                      command=self._ok).pack(side="right")
-        ctk.CTkButton(btns, text="Abbrechen", height=34, corner_radius=10, fg_color=SURFACE2,
-                      hover_color=BORDER, text_color=TEXT, border_width=1, border_color=BORDER,
-                      font=ui_font(13), command=self.cancel).pack(side="right", padx=(0, 8))
+                      command=self._ok).pack(side="right", width=150)
+        ctk.CTkButton(btns, text="Abbrechen", height=38, corner_radius=BTN_RADIUS, fg_color="transparent",
+                      hover_color=SURFACE2, text_color=MUTED, border_width=1, border_color=BORDER,
+                      font=ui_font(13), command=self.cancel).pack(side="right", padx=(0, 10), width=110)
 
         self.bind("<Return>", lambda e: self._ok())
         self.bind("<Escape>", lambda e: self.cancel())
@@ -1548,8 +1553,13 @@ class App(ctk.CTk):
             report_account_async(self.user.get("name", GAST))
         self.tools_desc = None
         self._update_title()
-        self.geometry("1240x820")
-        self.minsize(1060, 680)
+        self.geometry("1280x860")
+        self.minsize(1120, 700)
+        try:  # eigenes Fenster-Symbol statt des Tk-Feders
+            self._win_icon = ImageTk.PhotoImage(make_icon(64))
+            self.iconphoto(True, self._win_icon)
+        except Exception:
+            pass
         self.cfg = load_config()
         self._migrate_config()
         self._q = queue.Queue()
@@ -1687,7 +1697,7 @@ class App(ctk.CTk):
             "danger": dict(fg_color="transparent", hover_color="#3a1c1f", text_color=DANGER_TEXT,
                            border_width=1, border_color="#5a2a2e"),
         }[kind]
-        opts = dict(height=36, corner_radius=10, command=command,
+        opts = dict(height=36, corner_radius=BTN_RADIUS, command=command,
                     font=self._font(13, "bold" if kind == "primary" else "normal"))
         opts.update(styles)
         opts.update(kw)
@@ -1697,11 +1707,16 @@ class App(ctk.CTk):
         return dict(MENU_STYLE, font=self._font(13), dropdown_font=self._font(13))
 
     # -- Bausteine für die Einstellungen
-    def _section(self, parent, title):
-        box = ctk.CTkFrame(parent, corner_radius=16, fg_color=SURFACE, border_width=1, border_color=BORDER)
+    def _section(self, parent, title, desc=None):
+        box = ctk.CTkFrame(parent, corner_radius=CARD_RADIUS, fg_color=SURFACE, border_width=1, border_color=BORDER)
         box.pack(fill="x", pady=(0, 14))
-        ctk.CTkLabel(box, text=title, font=self._font(15, "bold"), text_color=TEXT,
-                     anchor="w").pack(fill="x", padx=18, pady=(16, 4))
+        head = ctk.CTkFrame(box, fg_color="transparent")
+        head.pack(fill="x", padx=20, pady=(18, 4))
+        ctk.CTkLabel(head, text=title, font=self._font(15, "bold"), text_color=TEXT,
+                     anchor="w").pack(anchor="w")
+        if desc:
+            ctk.CTkLabel(head, text=desc, font=self._font(11), text_color=MUTED, anchor="w",
+                         justify="left", wraplength=560).pack(anchor="w", pady=(2, 0))
         return box
 
     def _row(self, parent, title, desc=None):
@@ -1729,11 +1744,15 @@ class App(ctk.CTk):
         return sw
 
     def _nav_btn(self, parent, text, page):
-        b = ctk.CTkButton(parent, text=text, anchor="w", height=40, corner_radius=10,
+        holder = ctk.CTkFrame(parent, fg_color="transparent", height=42)
+        holder.pack(fill="x", padx=12, pady=2)
+        bar = ctk.CTkFrame(holder, width=3, height=22, corner_radius=2, fg_color="transparent")
+        bar.pack(side="left", padx=(4, 0))
+        b = ctk.CTkButton(holder, text=text, anchor="w", height=40, corner_radius=BTN_RADIUS,
                           font=self._font(14, "bold"), fg_color="transparent", hover_color=SURFACE2,
                           text_color=MUTED, command=lambda: self._show_page(page))
-        b.pack(fill="x", padx=14, pady=2)
-        self._nav[page] = b
+        b.pack(side="left", fill="x", expand=True, padx=(4, 0))
+        self._nav[page] = {"btn": b, "bar": bar}
 
     def _show_page(self, page):
         self._page = page
@@ -1742,9 +1761,11 @@ class App(ctk.CTk):
                 frame.grid()
             else:
                 frame.grid_remove()
-        for name, b in self._nav.items():
+        for name, parts in self._nav.items():
             on = name == page
-            b.configure(fg_color=SURFACE2 if on else "transparent", text_color=TEXT if on else MUTED)
+            parts["btn"].configure(fg_color=SURFACE2 if on else "transparent",
+                                   text_color=TEXT if on else MUTED)
+            parts["bar"].configure(fg_color=ACCENT if on else "transparent")
 
     def _build_ui(self):
         self.configure(fg_color=BG)
@@ -1768,28 +1789,38 @@ class App(ctk.CTk):
         titles.pack(side="left")
         ctk.CTkLabel(titles, text="Wallura", font=self._font(22, "bold"), text_color=TEXT,
                      anchor="w").pack(anchor="w")
-        ctk.CTkLabel(titles, text=f"Version {APP_VERSION}", font=self._font(11), text_color=MUTED,
-                     anchor="w").pack(anchor="w")
+        ctk.CTkLabel(titles, text="LIVE-WALLPAPER-ENGINE", font=self._font(9, "bold"), text_color=MUTED,
+                     anchor="w").pack(anchor="w", pady=(1, 0))
 
+        ctk.CTkLabel(side, text="MENÜ", font=self._font(9, "bold"), text_color=MUTED,
+                     anchor="w").pack(fill="x", padx=20, pady=(4, 6))
         self._nav_btn(side, "Bibliothek", "library")
         self._nav_btn(side, "Einstellungen", "settings")
 
         # Angemeldetes Konto
-        usercard = ctk.CTkFrame(side, corner_radius=16, fg_color=SURFACE2, border_width=1, border_color=BORDER)
+        usercard = ctk.CTkFrame(side, corner_radius=CARD_RADIUS, fg_color=SURFACE2, border_width=1,
+                                border_color=BORDER)
         usercard.pack(side="top", fill="x", padx=14, pady=(14, 4))
-        uinfo = ctk.CTkFrame(usercard, fg_color="transparent")
-        uinfo.pack(fill="x", padx=14, pady=(12, 0))
-        ctk.CTkLabel(uinfo, text="NICHT ANGEMELDET" if self.guest else "ANGEMELDET",
-                     font=self._font(10, "bold"), text_color=MUTED, anchor="w").pack(fill="x")
-        ctk.CTkLabel(uinfo, text=self.user.get("name", GAST), font=self._font(14, "bold"), text_color=TEXT,
+        urow = ctk.CTkFrame(usercard, fg_color="transparent")
+        urow.pack(fill="x", padx=12, pady=(12, 0))
+        who = (self.user.get("name", GAST) or GAST).strip() if not self.guest else GAST
+        ctk.CTkLabel(urow, text=(who[:1].upper() or "G"), width=36, height=36, corner_radius=18,
+                     fg_color=ACCENT_DIM if not self.guest else SURFACE3,
+                     text_color=ON_ACCENT if not self.guest else MUTED,
+                     font=self._font(15, "bold")).pack(side="left", padx=(0, 10))
+        uinfo = ctk.CTkFrame(urow, fg_color="transparent")
+        uinfo.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(uinfo, text="GASTMODUS" if self.guest else "ANGEMELDET",
+                     font=self._font(9, "bold"), text_color=MUTED, anchor="w").pack(fill="x")
+        ctk.CTkLabel(uinfo, text=who, font=self._font(14, "bold"), text_color=TEXT,
                      anchor="w").pack(fill="x")
-        ctk.CTkLabel(uinfo, text="Gastmodus" if self.guest else ROLES.get(self.user.get("role"), "Nutzer"),
+        ctk.CTkLabel(uinfo, text="Ohne Konto" if self.guest else ROLES.get(self.user.get("role"), "Nutzer"),
                      font=self._font(11), text_color=ACCENT if self.is_admin else MUTED,
                      anchor="w").pack(fill="x")
         self._btn(usercard, "Anmelden" if self.guest else "Abmelden",
                   self.login if self.guest else self.logout,
-                  "primary" if self.guest else "ghost", height=28,
-                  font=self._font(12)).pack(fill="x", padx=10, pady=(6, 10))
+                  "primary" if self.guest else "ghost", height=30,
+                  font=self._font(12)).pack(fill="x", padx=10, pady=(8, 10))
 
         ctk.CTkLabel(side, text=COPYRIGHT, font=self._font(10), text_color=MUTED, anchor="center",
                      wraplength=SIDEBAR_W - 24).pack(side="bottom", fill="x", padx=12, pady=(0, 12))
@@ -1845,10 +1876,13 @@ class App(ctk.CTk):
         lib.grid_rowconfigure(2, weight=1)
 
         mhead = ctk.CTkFrame(lib, fg_color="transparent")
-        mhead.grid(row=0, column=0, sticky="we", pady=(0, 10))
-        ctk.CTkLabel(mhead, text="Bibliothek", font=self._font(26, "bold"), text_color=TEXT).pack(side="left")
-        self.count_lbl = ctk.CTkLabel(mhead, text="", font=self._font(13), text_color=MUTED)
-        self.count_lbl.pack(side="left", padx=(12, 0), pady=(8, 0))
+        mhead.grid(row=0, column=0, sticky="we", pady=(0, 12))
+        titles = ctk.CTkFrame(mhead, fg_color="transparent")
+        titles.pack(side="left")
+        ctk.CTkLabel(titles, text="Bibliothek", font=self._font(28, "bold"), text_color=TEXT,
+                     anchor="w").pack(anchor="w")
+        self.count_lbl = ctk.CTkLabel(titles, text="", font=self._font(12), text_color=MUTED, anchor="w")
+        self.count_lbl.pack(anchor="w", pady=(2, 0))
         self._btn(mhead, "＋  Link", self.add_link, "secondary", width=90, height=34).pack(side="right")
         self._btn(mhead, "＋  Datei", self.add_local, "primary", width=100, height=34).pack(side="right", padx=(0, 8))
         self._search_job = None
@@ -1879,7 +1913,7 @@ class App(ctk.CTk):
 
         self.scroll = ctk.CTkScrollableFrame(lib, corner_radius=0, fg_color="transparent",
                                              scrollbar_button_color=BORDER, scrollbar_button_hover_color=MUTED)
-        self.scroll.grid(row=2, column=0, sticky="nsew")
+        self.scroll.grid(row=2, column=0, sticky="nsew", pady=(2, 0))
 
         # ---------- Seite: Einstellungen
         sett = ctk.CTkScrollableFrame(host, corner_radius=0, fg_color="transparent",
@@ -1890,7 +1924,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(inner, text="Einstellungen", font=self._font(26, "bold"), text_color=TEXT,
                      anchor="w").pack(fill="x", pady=(0, 14))
 
-        acc_box = self._section(inner, "Konto")
+        acc_box = self._section(inner, "Konto", "Anmeldung, Rolle und Passwort auf diesem PC.")
         if self.guest:
             row = self._row(acc_box, "Nicht angemeldet",
                             "Wallura läuft ohne Anmeldung. System, Tools und Updates sind frei nutzbar. "
@@ -1914,7 +1948,7 @@ class App(ctk.CTk):
                          justify="left", wraplength=520).pack(fill="x", padx=18, pady=(0, 12))
         ctk.CTkFrame(acc_box, height=6, fg_color="transparent").pack()
 
-        play = self._section(inner, "Wiedergabe")
+        play = self._section(inner, "Wiedergabe", "Anpassung, Tempo, Effekte und Tag/Nacht.")
         row = self._row(play, "Anpassung", "Wie das Video auf den Monitor gelegt wird.")
         self.fit_menu = ctk.CTkOptionMenu(row, values=list(FIT_MAP), command=self.on_fit, width=200,
                                           **self._menu_style())
@@ -1950,11 +1984,18 @@ class App(ctk.CTk):
                                         self.on_grayscale, self.cfg["grayscale"])
         row = self._row(play, "Tag/Nacht-Wallpaper",
                         "Zwischen 20 und 7 Uhr läuft automatisch das gewählte Nacht-Wallpaper.")
-        night_values = ["Aus"] + [shorten(i["title"], 28) for i in self.cfg["items"][:40]]
+        night_values, self._night_labels = ["Aus"], {}
+        for it in self.cfg["items"][:60]:
+            label = shorten(it["title"], 28)
+            if label in self._night_labels:  # gleiche Kurzfassung -> eindeutig machen
+                label = shorten(it["title"], 22) + "…" + it["id"][:4]
+            self._night_labels[label] = it["id"]
+            night_values.append(label)
         self.night_menu = ctk.CTkOptionMenu(row, values=night_values, command=self.on_night, width=200,
                                             **self._menu_style())
         cur_night = self.find_item(self.cfg.get("night_id") or "")
-        self.night_menu.set(shorten(cur_night["title"], 28) if cur_night else "Aus")
+        cur_label = next((k for k, v in self._night_labels.items() if v == (cur_night or {}).get("id")), "Aus")
+        self.night_menu.set(cur_label)
         self.night_menu.grid(row=0, column=1, sticky="e", padx=(16, 0))
         row = self._row(play, "Max. Qualität (Streams, p)", "Gilt für YouTube/Web-Links und Downloads.")
         self.q_menu = ctk.CTkOptionMenu(row, values=QUALITIES, command=self.on_quality, width=200,
@@ -1964,7 +2005,7 @@ class App(ctk.CTk):
         ctk.CTkFrame(play, height=6, fg_color="transparent").pack()
 
         # System und Tools & Updates stehen jedem zur Verfügung – auch ohne Konto (Gastmodus).
-        sysp = self._section(inner, "System")
+        sysp = self._section(inner, "System", "Start, Ruhezeiten und Verhalten im Hintergrund.")
         self.sw_pause = self._switch_row(sysp, "Pause, wenn der Desktop verdeckt ist",
                                          "Spart Leistung, solange Spiele oder Vollbild-Apps laufen.",
                                          self.on_pause_fs, self.cfg["pause_fullscreen"])
@@ -1985,7 +2026,7 @@ class App(ctk.CTk):
                                           self.on_notify_rotate, self.cfg["notify_rotate"])
         ctk.CTkFrame(sysp, height=6, fg_color="transparent").pack()
 
-        tools = self._section(inner, "Tools & Updates")
+        tools = self._section(inner, "Tools & Updates", "Player, Downloader und Aktualisierung.")
         row = self._row(tools, "Tools", "mpv (Player) und yt-dlp (Downloads)")
         self.tools_desc = row.desc
         self._btn(row, "Installieren / aktualisieren", self.on_install_tools, "secondary", width=200,
@@ -1999,7 +2040,7 @@ class App(ctk.CTk):
         ctk.CTkFrame(tools, height=6, fg_color="transparent").pack()
 
         if self.is_admin:  # Konten anlegen/ändern bleibt Administratoren vorbehalten
-            self._users_box = self._section(inner, "Benutzer")
+            self._users_box = self._section(inner, "Benutzer", "Konten auf diesem PC – nur für Administratoren.")
             row = self._row(self._users_box, "Konten",
                             "Wer sich anmelden darf und wer Adminrechte hat (nur Administratoren).")
             self._btn(row, "Neues Konto", self.add_user, "secondary", width=140, height=32,
@@ -2010,7 +2051,8 @@ class App(ctk.CTk):
             self._refresh_users()
 
             # Konten von allen PCs (fragt den Server im Hintergrund, damit der Start nicht hängt)
-            self._cloud_box = self._section(inner, "Konten auf allen PCs")
+            self._cloud_box = self._section(inner, "Konten auf allen PCs",
+                                            "Alle Konten, die auf PCs mit Wallura angelegt wurden.")
             row = self._row(self._cloud_box, "Konten-Übersicht",
                             "Alle Konten, die auf PCs mit Wallura angelegt wurden – nur für Administratoren.")
             self._btn(row, "Aktualisieren", self.refresh_cloud, "secondary", width=130, height=32,
@@ -2026,7 +2068,7 @@ class App(ctk.CTk):
             ctk.CTkFrame(self._cloud_box, height=6, fg_color="transparent").pack()
             self.after(150, self.refresh_cloud)
 
-        lib_box = self._section(inner, "Bibliothek")
+        lib_box = self._section(inner, "Bibliothek", "Sortierung, Statistik und Aufräumen.")
         row = self._row(lib_box, "Sortierung", "Reihenfolge der Wallpaper in der Bibliothek.")
         self.sort_menu_settings = ctk.CTkOptionMenu(row, values=list(SORTS), command=self.on_sort, width=200,
                                                    **self._menu_style())
@@ -2057,7 +2099,7 @@ class App(ctk.CTk):
                   font=self._font(11)).grid(row=0, column=1, sticky="e", padx=(16, 0))
         ctk.CTkFrame(lib_box, height=6, fg_color="transparent").pack()
 
-        data = self._section(inner, "Daten")
+        data = self._section(inner, "Daten", "Speicherort von Einstellungen, Downloads und Vorschaubildern.")
         row = self._row(data, "Datenordner", f"{DATA_DIR}\nEinstellungen, Downloads, Vorschaubilder und mpv-Logs")
         self._btn(row, "Ordner öffnen", self.open_data_dir, "secondary", width=200, height=32,
                   font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
@@ -2066,12 +2108,17 @@ class App(ctk.CTk):
         self._pages = {"library": lib, "settings": sett}
 
         # ---------- Player-Leiste unten: Status, Steuerung, Lautstärke
-        bar = ctk.CTkFrame(main, fg_color=SURFACE, corner_radius=14, border_width=1, border_color=BORDER)
+        bar = ctk.CTkFrame(main, fg_color=SURFACE, corner_radius=CARD_RADIUS, border_width=1, border_color=BORDER)
         bar.grid(row=2, column=0, sticky="we", pady=(12, 0))
         bar.grid_columnconfigure(0, weight=1)
         left = ctk.CTkFrame(bar, fg_color="transparent")
         left.grid(row=0, column=0, sticky="we", padx=(16, 8), pady=10)
-        self.status = ctk.CTkLabel(left, text="Bereit.", anchor="w", font=self._font(12), text_color=STATUS_OK)
+        ctk.CTkLabel(left, text="JETZT LÄUFT", font=self._font(9, "bold"), text_color=MUTED,
+                     anchor="w").pack(fill="x")
+        self.now_lbl = ctk.CTkLabel(left, text="Nichts aktiv", anchor="w", font=self._font(13, "bold"),
+                                    text_color=TEXT)
+        self.now_lbl.pack(fill="x", pady=(1, 1))
+        self.status = ctk.CTkLabel(left, text="Bereit.", anchor="w", font=self._font(11), text_color=MUTED)
         self.status.pack(fill="x")
         self.progress = ctk.CTkProgressBar(left, height=4, progress_color=ACCENT, fg_color=BORDER)
         self.progress.set(0)
@@ -2118,8 +2165,8 @@ class App(ctk.CTk):
         if w < 300:  # Fenster noch nicht angezeigt
             w = 1200 * scale
         avail = w / scale - SIDEBAR_W - 40 - 28   # Seitenränder + Scrollbalken
-        cols = max(1, int(avail // 276))
-        tw = int(avail / cols) - 36               # Kartenrand + Abstand
+        cols = max(1, int(avail // 296))
+        tw = int(avail / cols) - 42               # Kartenrand + Abstand
         return cols, max(200, min(tw, 420)) // 8 * 8
 
     def _on_resize(self, e):
@@ -2127,7 +2174,12 @@ class App(ctk.CTk):
             return
         if self._resize_job:
             self.after_cancel(self._resize_job)
-        self._resize_job = self.after(300, lambda: self._layout() != self._last_cols and self.refresh_library())
+        self._resize_job = self.after(300, self._relayout)
+
+    def _relayout(self):
+        self._resize_job = None
+        if not self._closing and self._layout() != self._last_cols:
+            self.refresh_library()
 
     def _on_search(self, *_):
         if self._search_job:
@@ -2182,6 +2234,7 @@ class App(ctk.CTk):
     def refresh_library(self):
         self._refresh_monitor_ui()
         self._update_stats()
+        self._refresh_now_playing()
         for w in self.scroll.winfo_children():
             w.destroy()
         on = {}
@@ -2203,30 +2256,40 @@ class App(ctk.CTk):
         else:
             self.count_lbl.configure(text=f"{len(shown)} von {n_items}" if filtering else f"{n_items} Wallpaper")
         if n_items and not shown:
-            ctk.CTkLabel(self.scroll, text="Keine Treffer.", font=self._font(14),
-                         text_color=MUTED).grid(row=0, column=0, columnspan=cols, padx=20, pady=40)
+            box = ctk.CTkFrame(self.scroll, corner_radius=CARD_RADIUS, fg_color=SURFACE, border_width=1,
+                               border_color=BORDER)
+            box.grid(row=0, column=0, columnspan=cols, padx=8, pady=40)
+            ctk.CTkLabel(box, text="Keine Treffer", font=self._font(20, "bold"),
+                         text_color=TEXT).pack(padx=56, pady=(30, 4))
+            ctk.CTkLabel(box, text="Andere Suche oder einen anderen Filter probieren.",
+                         font=self._font(13), text_color=MUTED).pack(padx=56)
+            self._btn(box, "Filter zurücksetzen", self.reset_filters, "secondary", width=170).pack(
+                pady=(16, 30))
             return
         if not n_items:
-            box = ctk.CTkFrame(self.scroll, corner_radius=18, fg_color=SURFACE, border_width=1, border_color=BORDER)
-            box.grid(row=0, column=0, columnspan=cols, padx=8, pady=24)
-            ctk.CTkLabel(box, text="Noch keine Wallpaper", font=self._font(20, "bold"),
-                         text_color=TEXT).pack(padx=56, pady=(32, 4))
-            ctk.CTkLabel(box, text="Füge ein Video, ein Bild oder einen YouTube-Link hinzu.",
-                         font=self._font(13), text_color=MUTED).pack(padx=56)
+            box = ctk.CTkFrame(self.scroll, corner_radius=CARD_RADIUS, fg_color=SURFACE, border_width=1,
+                               border_color=BORDER)
+            box.grid(row=0, column=0, columnspan=cols, padx=8, pady=36)
+            ctk.CTkLabel(box, text="Deine Leinwand ist noch leer", font=self._font(22, "bold"),
+                         text_color=TEXT).pack(padx=60, pady=(40, 6))
+            ctk.CTkLabel(box, text="Füge ein Video, ein Bild oder einen Link (YouTube, Web) hinzu – danach\n"
+                                   "läuft es hinter deinen Desktop-Icons, auf einem oder allen Monitoren.",
+                         font=self._font(13), text_color=MUTED, justify="center").pack(padx=60)
             brow = ctk.CTkFrame(box, fg_color="transparent")
-            brow.pack(padx=56, pady=(18, 32))
-            self._btn(brow, "＋  Datei hinzufügen", self.add_local, "primary", width=170).pack(side="left", padx=4)
-            self._btn(brow, "＋  Link", self.add_link, "secondary", width=110).pack(side="left", padx=4)
-            return
+            brow.pack(padx=60, pady=(22, 40))
+            self._btn(brow, "＋  Datei hinzufügen", self.add_local, "primary", width=180, height=38).pack(
+                side="left", padx=4)
+            self._btn(brow, "＋  Link", self.add_link, "secondary", width=130, height=38).pack(side="left", padx=4)
         for n, item in enumerate(shown):
             self._card(item, n // cols, n % cols, tw)
 
     def _card(self, item, r, c, tw):
         on = sorted(self._on_map.get(item["id"], []))
         active = bool(on) and self.player.active
-        card = ctk.CTkFrame(self.scroll, corner_radius=16, fg_color="#14232c" if active else SURFACE,
+        card = ctk.CTkFrame(self.scroll, corner_radius=CARD_RADIUS,
+                            fg_color="#0e2530" if active else SURFACE,
                             border_width=2 if active else 1, border_color=ACCENT if active else BORDER)
-        card.grid(row=r, column=c, padx=8, pady=8, sticky="n")
+        card.grid(row=r, column=c, padx=9, pady=9, sticky="n")
         where = None
         if active:
             if self._mon_count == 1:
@@ -2236,35 +2299,59 @@ class App(ctk.CTk):
             else:
                 where = "Monitor " + ", ".join(str(i + 1) for i in on)
         lbl = ctk.CTkLabel(card, image=self._thumb_image(item, tw, where), text="", cursor="hand2")
-        lbl.pack(padx=10, pady=(10, 8))
+        lbl.pack(padx=12, pady=(12, 10))
         lbl.bind("<Button-1>", lambda e, it=item: self.apply(it))
         lbl.bind("<Double-Button-1>", lambda e, it=item: self.apply_all(it))
         if not active:
             lbl.bind("<Enter>", lambda e, cd=card: cd.configure(border_color=ACCENT_DIM))
             lbl.bind("<Leave>", lambda e, cd=card: cd.configure(border_color=BORDER))
-        ctk.CTkLabel(card, text=shorten(item["title"], max(18, tw // 7)), font=self._font(14, "bold"),
-                     text_color=TEXT, anchor="w", width=tw).pack(padx=12, anchor="w")
+        ctk.CTkLabel(card, text=shorten(item["title"], max(16, tw // 8)), font=self._font(14, "bold"),
+                     text_color=TEXT, anchor="w", width=tw).pack(padx=14, anchor="w")
+        plays = int(item.get("plays", 0) or 0)
+        meta = KIND_LABEL.get(item["kind"], "?") + (f"  ·  {plays}× genutzt" if plays else "")
+        ctk.CTkLabel(card, text=meta, font=self._font(11), text_color=MUTED, anchor="w",
+                     width=tw).pack(padx=14, anchor="w", pady=(2, 10))
         row = ctk.CTkFrame(card, fg_color="transparent")
-        row.pack(fill="x", padx=10, pady=(8, 12))
+        row.pack(fill="x", padx=11, pady=(0, 12))
         row.grid_columnconfigure(0, weight=1)
-        self._btn(row, "▶  Anwenden", lambda it=item: self.apply(it), "secondary" if active else "primary",
-                  height=32, width=10, font=self._font(12, "bold")).grid(row=0, column=0, sticky="we")
+        self._btn(row, "Aktiv" if active else "▶  Anwenden", lambda it=item: self.apply(it),
+                  "secondary" if active else "primary", height=34, width=10,
+                  font=self._font(12, "bold")).grid(row=0, column=0, sticky="we")
         col = 1
-        self._btn(row, "✎", lambda it=item: self.rename_item(it), "ghost", width=32, height=32).grid(
+        self._btn(row, "✎", lambda it=item: self.rename_item(it), "ghost", width=32, height=34).grid(
             row=0, column=col, padx=(6, 0))
         col += 1
         self._btn(row, "★" if item.get("fav") else "☆", lambda it=item: self.toggle_favorite(it),
-                  "ghost", width=32, height=32,
+                  "ghost", width=32, height=34,
                   text_color=ACCENT if item.get("fav") else MUTED).grid(row=0, column=col, padx=(6, 0))
         col += 1
         if item["kind"] != "local":
-            self._btn(row, "⬇", lambda it=item: self.download(it), "ghost", width=32, height=32).grid(
+            self._btn(row, "⬇", lambda it=item: self.download(it), "ghost", width=32, height=34).grid(
                 row=0, column=col, padx=(6, 0))
             col += 1
-        self._btn(row, "✕", lambda it=item: self.remove(it), "ghost", width=32, height=32,
+        self._btn(row, "✕", lambda it=item: self.remove(it), "ghost", width=32, height=34,
                   hover_color="#3a1c1f").grid(row=0, column=col, padx=(6, 0))
 
     # -- Favoriten, Zufall und automatischer Wechsel
+    def _refresh_now_playing(self):
+        lbl = getattr(self, "now_lbl", None)
+        if lbl is None:
+            return
+        active = self._assign_items()
+        if not active or not self.player.active:
+            lbl.configure(text="Nichts aktiv")
+            return
+        item = next(iter(active.values()))
+        more = f"  +{len({i['id'] for i in active.values()}) - 1}" if len({i['id'] for i in active.values()}) > 1 else ""
+        lbl.configure(text=shorten(item["title"], 44) + more)
+
+    def reset_filters(self):
+        self.search_var.set("")
+        self.kind_filter.set("Alle")
+        self.cfg["last_kind"] = "Alle"
+        save_config(self.cfg)
+        self.refresh_library()
+
     def _visible_items(self):
         """Wallpaper, die gerade in der Bibliothek sichtbar sind (Suche + Filter + Sortierung)."""
         q = self.search_var.get().strip().lower()
@@ -2311,6 +2398,7 @@ class App(ctk.CTk):
         self.refresh_library()
         self.set_status(f"{'Zu Favoriten hinzugefügt' if item['fav'] else 'Aus Favoriten entfernt'}: "
                         f"{shorten(item['title'], 40)}")
+        self.toast(f"{'★  Zu Favoriten hinzugefügt' if item['fav'] else '☆  Aus Favoriten entfernt'}")
 
     def rename_item(self, item):
         res = self._form("Titel ändern", [{"key": "title", "label": "Neuer Titel", "type": "text",
@@ -2494,11 +2582,7 @@ class App(ctk.CTk):
         self.restart_current()
 
     def on_night(self, label):
-        if label == "Aus":
-            self.cfg["night_id"] = ""
-        else:
-            self.cfg["night_id"] = next((i["id"] for i in self.cfg["items"]
-                                         if shorten(i["title"], 28) == label), "")
+        self.cfg["night_id"] = (getattr(self, "_night_labels", {}) or {}).get(label, "")
         save_config(self.cfg)
         self.set_status("Nacht-Wallpaper aus." if not self.cfg["night_id"]
                         else f"Nacht-Wallpaper (20–7 Uhr): {label}")
@@ -2550,6 +2634,7 @@ class App(ctk.CTk):
         try:
             Path(path).write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
             self.set_status(f"Bibliothek exportiert: {Path(path).name}")
+            self.toast("Bibliothek exportiert")
         except Exception as e:
             self.set_status(f"Export fehlgeschlagen: {e}", True)
 
@@ -2633,6 +2718,7 @@ class App(ctk.CTk):
             self.set_status("Kein Wallpaper aktiv – Screenshot nicht möglich.", True)
             return
         self.set_status(f"Screenshot gespeichert: {paths[0].name}")
+        self.toast(f"Screenshot gespeichert: {paths[0].name}")
         try:
             os.startfile(str(paths[0].parent))
         except Exception:
@@ -2676,12 +2762,20 @@ class App(ctk.CTk):
             self.refresh_library()
 
     def add_link(self):
-        dlg = ctk.CTkInputDialog(text="YouTube-, Video- oder Web-Link einfügen:", title="Link hinzufügen")
-        url = (dlg.get_input() or "").strip()
+        res = self._form("Link hinzufügen", [
+            {"key": "url", "label": "YouTube-, Video- oder Web-Link", "type": "text",
+             "placeholder": "https://…"},
+        ], "Wallura erkennt YouTube-Links, direkte Videodateien und alles, was yt-dlp kann.", "Hinzufügen")
+        if res is None:
+            return
+        url = (res.get("url") or "").strip()
         if not url:
             return
         if not re.match(r"https?://", url, re.I):
             self.set_status("Das sieht nicht nach einem Link aus (https://…).", True)
+            return
+        if any(i["src"].strip().lower() == url.lower() for i in self.cfg["items"]):
+            self.set_status("Dieser Link ist schon in der Bibliothek.", True)
             return
         item = {"id": uuid.uuid4().hex[:10], "title": url, "kind": detect_kind(url), "src": url,
                 "added": time.time(), "plays": 0}
@@ -2741,6 +2835,7 @@ class App(ctk.CTk):
         if ok:
             where = "" if len(idxs) != 1 or self._mon_count == 1 else f" (Monitor {idxs[0] + 1})"
             self.ui(lambda: self.set_status(f"Aktiv: {shorten(item['title'], 60)}{where}"))
+            self.ui(lambda: self.toast(f"▶  Läuft jetzt: {shorten(item['title'], 40)}"))
         self.ui(self.refresh_library)
 
     def stop_wallpaper(self):
@@ -2774,6 +2869,9 @@ class App(ctk.CTk):
         self.apply(items[(ids.index(cur) + 1) % len(items)] if cur in ids else items[0])
 
     def toggle_pause(self):
+        if not self.player.active:
+            self.set_status("Kein Wallpaper aktiv – zuerst eines anwenden.", True)
+            return
         self.player.set_manual_pause(not self.player.paused_manual)
         self.btn_pause.configure(text="Weiter" if self.player.paused_manual else "Pause")
         self.set_status("Pausiert." if self.player.paused_manual else "Läuft weiter.")
@@ -2804,6 +2902,7 @@ class App(ctk.CTk):
                 make_local_thumb(item["id"], path)
             self.ui(lambda: (self.progress.set(1),
                              self.set_status(f"Heruntergeladen: {path.name} (offline nutzbar)"),
+                             self.toast("⬇  Download fertig – jetzt offline nutzbar"),
                              self.refresh_library()))
         finally:
             self._downloads.discard(item["id"])
@@ -3003,9 +3102,10 @@ class App(ctk.CTk):
         w, h = t.winfo_reqwidth(), t.winfo_reqheight()
         try:
             mon = win32api.MonitorFromPoint((0, 0), win32con.MONITOR_DEFAULTTOPRIMARY)
-            left, top, right, bottom = win32api.GetMonitorInfo(mon)["Work"]
+            work = win32api.GetMonitorInfo(mon)["Work"]
+            right, bottom = work[2], work[3]
         except Exception:
-            left, top, right, bottom = 0, 0, t.winfo_screenwidth(), t.winfo_screenheight()
+            right, bottom = t.winfo_screenwidth(), t.winfo_screenheight()
         margin = 16
         tkinter.Wm.geometry(t, f"{w}x{h}+{right - w - margin}+{bottom - h - margin}")
         t.deiconify()
@@ -3079,6 +3179,43 @@ class App(ctk.CTk):
     # -- Status
     def set_status(self, text, error=False):
         self.status.configure(text=text, text_color=STATUS_ERR if error else STATUS_OK)
+
+    def toast(self, text, error=False):
+        """Kurzer Hinweis unten rechts im Fenster (verschwindet von selbst)."""
+        old = getattr(self, "_toast", None)
+        if old is not None:
+            try:
+                old.destroy()
+            except Exception:
+                pass
+        try:
+            t = ctk.CTkToplevel(self)
+            t.withdraw()
+            t.overrideredirect(True)
+            t.attributes("-topmost", True)
+            frame = ctk.CTkFrame(t, corner_radius=14, fg_color=SURFACE2, border_width=1,
+                                 border_color="#5a2a2e" if error else BORDER)
+            frame.pack()
+            ctk.CTkLabel(frame, text=text, font=self._font(12), text_color=STATUS_ERR if error else TEXT,
+                         anchor="w", justify="left", wraplength=320).pack(padx=16, pady=12)
+            t.update_idletasks()
+            w, h = t.winfo_reqwidth(), t.winfo_reqheight()
+            x = self.winfo_rootx() + max(0, self.winfo_width() - w - 28)
+            y = self.winfo_rooty() + max(0, self.winfo_height() - h - 28)
+            t.geometry(f"{w}x{h}+{x}+{y}")
+            t.deiconify()
+            self._toast = t
+            self.after(3600, lambda: self._hide_toast(t))
+        except Exception:
+            pass
+
+    def _hide_toast(self, t):
+        try:
+            if getattr(self, "_toast", None) is t:
+                self._toast = None
+            t.destroy()
+        except Exception:
+            pass
 
     def _update_tools_banner(self):
         found = {n: bool(find_tool(n)) for n in ("mpv", "yt-dlp")}
@@ -3300,9 +3437,11 @@ class App(ctk.CTk):
         def work():
             try:
                 accounts = fetch_cloud_accounts(token)
-                self.ui(lambda: self._render_cloud(accounts))
             except Exception as e:
-                self.ui(lambda: self._cloud_status.configure(text=f"Kontenliste nicht abrufbar ({e})."))
+                msg = f"Kontenliste nicht abrufbar ({e})."
+                self.ui(lambda: self._cloud_status.configure(text=msg))
+                return
+            self.ui(lambda: self._render_cloud(accounts))
 
         threading.Thread(target=work, daemon=True).start()
 
