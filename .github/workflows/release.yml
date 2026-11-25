@@ -30,7 +30,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
           python make_icon.py
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --name Wallura --icon wallura.ico --collect-all customtkinter --hidden-import pystray._win32 wallura.py
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name Wallura --icon wallura.ico --add-data "assets;assets" --collect-all customtkinter --hidden-import pystray._win32 wallura.py
 
       - name: Tools (mpv, yt-dlp) laden
         shell: bash

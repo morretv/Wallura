@@ -52,6 +52,8 @@ GITHUB_REPO = "MorreTv/Wallura"
 # Server für die zentrale Kontenliste (Code im Ordner "cloud/"). Leer = Konten bleiben nur lokal.
 CLOUD_URL = "https://wallura-konten-1jomkz.freebuff.site"
 APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+# Mitgelieferte Bilder (PyInstaller entpackt sie nach _MEIPASS, sonst neben wallura.py)
+ASSET_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR)) / "assets"
 DATA_DIR = Path(os.environ.get("APPDATA", str(APP_DIR))) / APP_NAME
 # Umzug von der alten Version: %APPDATA%\\LiveWall -> %APPDATA%\\Wallura (Einstellungen, Downloads, Tools)
 OLD_APP_NAME = "LiveWall"
@@ -108,6 +110,19 @@ YT_ID_RE = re.compile(r"(?:v=|youtu\.be/|/shorts/|/embed/|/live/)([A-Za-z0-9_-]{
 FIT_MAP = {"Füllen (zuschneiden)": "cover", "Einpassen (Balken)": "contain", "Strecken": "stretch"}
 QUALITIES = ["720", "1080", "1440", "2160"]
 FPS_MAP = {"Original": 0, "60 FPS": 60, "30 FPS": 30, "24 FPS (sparsam)": 24}
+# Premium: eigener Desktop (Hintergrund + Uhr/Datum/Text wie bei Rainmeter)
+DESK_ID = "desk"
+DESK_THEMES = {"Anime-Dämmerung": "anime.jpg", "Neon-Auto": "auto.jpg",
+               "Bergmorgen": "natur.jpg", "Neon-Wellen": "neon.jpg"}
+DESK_POS = {"Unten links": "bl", "Unten rechts": "br", "Unten mitte": "bc",
+            "Oben links": "tl", "Oben rechts": "tr"}
+DESK_COLORS = {"Weiß": "FFFFFF", "Anthrazit": "16181D", "Akzent": "FFC24C",
+               "Gold": "3FBFF5", "Mint": "C0F07E", "Rosé": "AE6FFF"}
+DESK_COLOR_RGB = {"Weiß": (255, 255, 255), "Anthrazit": (22, 24, 29), "Akzent": (76, 194, 255),
+                  "Gold": (245, 191, 63), "Mint": (126, 240, 192), "Rosé": (255, 111, 174)}
+DESK_WEEK = ("Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag")
+DESK_MONTH = ("Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August",
+              "September", "Oktober", "November", "Dezember")
 ROTATE_MAP = {"Aus": 0, "Alle 5 Minuten": 5, "Alle 15 Minuten": 15, "Alle 30 Minuten": 30,
               "Jede Stunde": 60, "Alle 3 Stunden": 180}
 SORTS = {"Zuletzt hinzugefügt": "new", "Titel A–Z": "az", "Meistgesehen": "plays",
@@ -146,6 +161,16 @@ DEFAULTS = {
     "auto_update": True,
     "update_repo": "",    # optional: überschreibt GITHUB_REPO
     "cloud_token": "",    # Zugang zur Konten-Übersicht (wird beim Freischalten gesetzt)
+    "desk": {             # Premium: eigener Desktop mit Uhr/Datum/Text
+        "bg": "",         # eigener Hintergrund (Bild/Video), leer = Thema
+        "theme": "Anime-Dämmerung",
+        "clock": True,
+        "date": True,
+        "text": "",
+        "pos": "Unten links",
+        "color": "Weiß",
+        "size": 72,
+    },
 }
 
 
@@ -250,6 +275,22 @@ def load_config():
     except (TypeError, ValueError):
         bright = 100
     cfg["brightness"] = bright if bright in BRIGHT_MAP.values() else DEFAULTS["brightness"]
+    raw_desk = cfg.get("desk") if isinstance(cfg.get("desk"), dict) else {}
+    base_desk = DEFAULTS["desk"]
+    try:
+        desk_size = max(32, min(140, int(raw_desk.get("size", base_desk["size"]))))
+    except (TypeError, ValueError):
+        desk_size = base_desk["size"]
+    cfg["desk"] = {
+        "bg": raw_desk.get("bg") if isinstance(raw_desk.get("bg"), str) else "",
+        "theme": raw_desk.get("theme") if raw_desk.get("theme") in DESK_THEMES else base_desk["theme"],
+        "clock": _as_bool(raw_desk.get("clock", True), True),
+        "date": _as_bool(raw_desk.get("date", True), True),
+        "text": " ".join(str(raw_desk.get("text") or "").split())[:80],
+        "pos": raw_desk.get("pos") if raw_desk.get("pos") in DESK_POS else base_desk["pos"],
+        "color": raw_desk.get("color") if raw_desk.get("color") in DESK_COLORS else base_desk["color"],
+        "size": desk_size,
+    }
     cfg["night_id"] = cfg.get("night_id") if isinstance(cfg.get("night_id"), str) else ""
     cfg["last_kind"] = cfg.get("last_kind") if cfg.get("last_kind") in KIND_FILTER else DEFAULTS["last_kind"]
     for key in ("fav_playlist", "quiet_hours", "pause_battery", "random_start", "notify_rotate",
@@ -303,6 +344,7 @@ def load_accounts():
                       "pw": user["pw"],
                       "role": ("admin" if user.get("role") == "admin" or key == ADMIN_NAME.lower()
                                else "user"),
+                      "premium": bool(user.get("premium")),
                       "created": user.get("created") if isinstance(user.get("created"), int) else 0}
     # Kein automatischer Aufstieg zum Administrator: neue Konten bleiben normale Nutzer,
     # auch wenn auf dem PC noch kein Administrator existiert.
@@ -336,7 +378,8 @@ def create_account(acc, name, pw, role="user"):
         return False, "Diesen Benutzernamen gibt es schon."
     if role not in ROLES:
         return False, "Unbekannte Rolle."
-    entry = {"name": name, "pw": _hash_password(pw), "role": role, "created": int(time.time())}
+    entry = {"name": name, "pw": _hash_password(pw), "role": role, "premium": False,
+             "created": int(time.time())}
     acc["users"][name.lower()] = entry
     if not save_accounts(acc):
         acc["users"].pop(name.lower(), None)
@@ -381,6 +424,19 @@ def set_role(acc, name, role):
     user["role"] = role
     if not save_accounts(acc):
         user["role"] = old
+        return False, "Die Konten-Datei ließ sich nicht speichern."
+    return True, ""
+
+
+def set_premium(acc, name, on):
+    """Premium für ein Konto setzen (nur der Desktop-Editor nutzt das)."""
+    user = find_account(acc, name)
+    if not user:
+        return False, "Konto nicht gefunden."
+    old = user.get("premium", False)
+    user["premium"] = bool(on)
+    if not save_accounts(acc):
+        user["premium"] = old
         return False, "Die Konten-Datei ließ sich nicht speichern."
     return True, ""
 
@@ -440,7 +496,8 @@ def load_session():
     if not user or data.get("fp") != _pw_fingerprint(user):
         clear_session()  # Konto gelöscht oder Passwort geändert -> wieder Anmeldung nötig
         return None
-    return {"name": user.get("name", key), "role": user.get("role", "user")}
+    return {"name": user.get("name", key), "role": user.get("role", "user"),
+            "premium": bool(user.get("premium"))}
 
 
 # ----------------------------------------------------------------------------- Konten-Übersicht
@@ -961,6 +1018,181 @@ def fps_script():
     return str(path).replace("\\", "/")
 
 
+# ----------------------------------------------------------------------------- Eigener Desktop (Premium)
+def desk_font(size, bold=True):
+    for name in (("segoeuib.ttf" if bold else "segoeui.ttf"), ("arialbd.ttf" if bold else "arial.ttf"),
+                 "DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
+
+
+def desk_fallback_background():
+    """Falls die mitgelieferten Motive fehlen: ruhiger Verlauf als Ersatz."""
+    path = DATA_DIR / "desk_fallback.jpg"
+    if not path.exists():
+        w, h = 1920, 1080
+        img = Image.new("RGB", (w, h))
+        d = ImageDraw.Draw(img)
+        top, bottom = (16, 24, 44), (5, 7, 12)
+        for y in range(h):
+            k = y / (h - 1)
+            d.line([(0, y), (w, y)], fill=tuple(int(top[i] + (bottom[i] - top[i]) * k) for i in range(3)))
+        img.save(path, quality=88)
+    return str(path)
+
+
+def desk_background_path(desk):
+    """Bild/Video des eigenen Desktops (eigene Datei vor mitgeliefertem Thema)."""
+    desk = desk if isinstance(desk, dict) else {}
+    bg = desk.get("bg")
+    if isinstance(bg, str) and bg and Path(bg).exists():
+        return bg
+    asset = ASSET_DIR / "desktop" / DESK_THEMES.get(desk.get("theme"), "anime.jpg")
+    return str(asset) if asset.exists() else desk_fallback_background()
+
+
+def desk_text_lines(desk, when=None):
+    """-> [(Text, Schriftgröße für 1080p, fett)] – Uhr, Datum und eigener Text."""
+    t = time.localtime() if when is None else when
+    size = int(desk.get("size", 72) or 72)
+    out = []
+    if desk.get("clock", True):
+        out.append((time.strftime("%H:%M", t), size, True))
+    sub = max(13, int(size * 0.36))
+    if desk.get("date", True):
+        out.append((f"{DESK_WEEK[t.tm_wday]}, {t.tm_mday}. {DESK_MONTH[t.tm_mon - 1]}", sub, False))
+    text = " ".join(str(desk.get("text") or "").split())[:80]
+    if text:
+        out.append((text, sub, False))
+    return out
+
+
+def render_desk_image(desk, size=(1920, 1080), when=None):
+    """Zeichnet Hintergrund + Overlay als Bild (Vorschau und Export)."""
+    W, H = size
+    try:
+        img = Image.open(desk_background_path(desk)).convert("RGB")
+    except Exception:
+        img = Image.new("RGB", (W, H), (10, 12, 18))
+    img = ImageOps.fit(img, (W, H)).convert("RGBA")
+    scrim = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(scrim)
+    start = int(H * 0.42)  # unten abdunkeln, damit die Schrift immer lesbar bleibt
+    for y in range(start, H):
+        alpha = int(125 * ((y - start) / max(1, H - start)) ** 1.5)
+        sd.line([(0, y), (W, y)], fill=(0, 0, 0, alpha))
+    img = Image.alpha_composite(img, scrim)
+    lines = desk_text_lines(desk, when)
+    if not lines:
+        return img.convert("RGB")
+    d = ImageDraw.Draw(img)
+    pos = desk.get("pos", "Unten links")
+    top = str(pos).startswith("Oben")
+    align = "r" if str(pos).endswith("rechts") else ("l" if str(pos).endswith("links") else "m")
+    m = max(24, int(min(W, H) * 0.06))
+    heights = [int(s * H / 1080 * 1.3) for _, s, _ in lines]
+    y = m if top else H - m - sum(heights)
+    x = m if align == "l" else (W - m if align == "r" else W // 2)
+    color = DESK_COLOR_RGB.get(desk.get("color"), (255, 255, 255))
+    for (text, fsize, bold), hh in zip(lines, heights):
+        font = desk_font(max(10, int(fsize * H / 1080)), bold)
+        d.text((x + 3, y + 4), text, font=font, fill=(0, 0, 0, 165), anchor=align + "t")
+        d.text((x, y), text, font=font, fill=color + (255,), anchor=align + "t")
+        y += hh
+    return img.convert("RGB")
+
+
+DESK_LUA_BODY = r'''
+local function esc(s)
+    return (s:gsub("\\", ""):gsub("{", "("):gsub("}", ")"))
+end
+local WEEK = {"Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"}
+local MONTH = {"Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"}
+local function draw()
+    local t = os.date("*t")
+    local lines = {}
+    if CFG.clock then
+        lines[#lines + 1] = {os.date("%H:%M", t), CFG.size, true}
+    end
+    local sub = math.max(13, math.floor(CFG.size * 0.36))
+    if CFG.date then
+        lines[#lines + 1] = {string.format("%s, %d. %s", WEEK[t.wday], t.day, MONTH[t.month]), sub, false}
+    end
+    if CFG.text ~= "" then
+        lines[#lines + 1] = {esc(CFG.text), sub, false}
+    end
+    if #lines == 0 then
+        mp.command_native({name = "osd-overlay", id = "wallura-desk", format = "none"})
+        return
+    end
+    local hs, total = {}, 0
+    for i = 1, #lines do
+        hs[i] = math.floor(lines[i][2] * 1.3)
+        total = total + hs[i]
+    end
+    local m = math.max(24, math.floor(math.min(CFG.w, CFG.h) * 0.06))
+    local top = (CFG.pos == "tl" or CFG.pos == "tr")
+    local x = m
+    if CFG.pos == "br" or CFG.pos == "tr" then x = CFG.w - m end
+    if CFG.pos == "bc" then x = math.floor(CFG.w / 2) end
+    local events = {}
+    for i = 1, #lines do
+        local an
+        if top then
+            an = (CFG.pos == "tl" and 7) or (CFG.pos == "tr" and 9) or 8
+        else
+            an = (CFG.pos == "bl" and 1) or (CFG.pos == "br" and 3) or 2
+        end
+        local y
+        if top then
+            y = m
+            for k = 1, i - 1 do y = y + hs[k] end
+        else
+            y = CFG.h - m
+            for k = #lines, i + 1, -1 do y = y - hs[k] end
+        end
+        events[#events + 1] = string.format(
+            "Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an%d\\pos(%d,%d)\\fs%d\\c&H%s&\\3c&H000000&\\bord3\\shad0\\b%d\\fnSegoe UI}%s",
+            an, x, y, lines[i][2], CFG.color, lines[i][3] and 1 or 0, lines[i][1])
+    end
+    mp.command_native({name = "osd-overlay", id = "wallura-desk", format = "ass-events",
+                       data = table.concat(events, "\n"), res_x = CFG.w, res_y = CFG.h})
+end
+draw()
+mp.add_periodic_timer(1.0, draw)
+mp.register_event("file-loaded", draw)
+'''
+
+
+def desk_lua_source(desk, w, h):
+    cfg = {
+        "clock": bool(desk.get("clock", True)),
+        "date": bool(desk.get("date", True)),
+        "text": " ".join(str(desk.get("text") or "").split())[:80],
+        "pos": DESK_POS.get(desk.get("pos"), "bl"),
+        "color": DESK_COLORS.get(desk.get("color"), "FFFFFF"),
+        "size": int(desk.get("size", 72) or 72),
+        "w": int(w),
+        "h": int(h),
+    }
+    return "local CFG = " + json.dumps(cfg, ensure_ascii=False) + "\n" + DESK_LUA_BODY
+
+
+def desk_script(desk, w, h):
+    """Schreibt das Overlay-Skript für genau diese Monitor-Auflösung (mpv liest es beim Start)."""
+    try:
+        path = DATA_DIR / f"desk_{int(w)}x{int(h)}.lua"
+        source = desk_lua_source(desk, w, h)
+        if not path.exists() or path.read_text(encoding="utf-8") != source:
+            path.write_text(source, encoding="utf-8")
+        return str(path).replace("\\", "/")
+    except OSError:
+        return None
+
+
 # ----------------------------------------------------------------------------- Player
 class Player:
     def __init__(self, cfg, on_error):
@@ -992,6 +1224,12 @@ class Player:
             return job
         except Exception:
             return None
+
+    def _desk_args(self, rect):
+        script = desk_script(self.cfg.get("desk") or {}, rect[2], rect[3])
+        if not script:
+            return []
+        return [f"--script={script}", "--osd-level=2"]
 
     def _add_to_job(self, proc):
         if self.job:
@@ -1120,6 +1358,8 @@ class Player:
         new = {}
         for idx, item in todo.items():
             src = item["src"]
+            if item.get("id") == DESK_ID:  # Motiv immer frisch aus den Desktop-Einstellungen
+                src = desk_background_path(self.cfg.get("desk") or {})
             if item["kind"] == "local" and not Path(src).exists():
                 self.on_error(f"Datei nicht gefunden: {src}")
                 ok = False
@@ -1131,6 +1371,8 @@ class Player:
             pipe = rf"\\.\pipe\wallura_{os.getpid()}_{idx}"
             log = DATA_DIR / f"mpv_{idx}.log"
             extra = ["--cache=no"] if item["kind"] == "local" else []  # lokale Dateien brauchen keinen Puffer
+            if item.get("id") == DESK_ID:  # Premium-Desktop: Uhr/Datum/Text als Live-Overlay
+                extra += self._desk_args(mons[idx]["rect"])
             cmd = base + extra + [f"--title=Wallura-{os.getpid()}-{idx}", f"--input-ipc-server={pipe}",
                                   f"--log-file={log}", src]
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -1424,7 +1666,7 @@ class LoginDialog(ctk.CTkToplevel):
                 return
             user = find_account(self.acc, name)
             self._finish({"name": user.get("name", name), "role": user.get("role", role),
-                          "remember": True})
+                          "premium": bool(user.get("premium")), "remember": True})
         else:
             user = authenticate(self.acc, name, pw)
             if not user:
@@ -1432,6 +1674,7 @@ class LoginDialog(ctk.CTkToplevel):
                 return
             # Passwort-Hash bewusst nicht in die Sitzung übernehmen
             self._finish({"name": user.get("name", name), "role": user.get("role", "user"),
+                          "premium": bool(user.get("premium")),
                           "remember": bool(self.remember_var.get())})
 
     def _finish(self, session):
@@ -1501,6 +1744,17 @@ class PasswordDialog(ctk.CTkToplevel):
         ctk.CTkLabel(box, text=subtitle, font=ui_font(11), text_color=MUTED, anchor="w", justify="left",
                      wraplength=350).pack(fill="x", padx=24, pady=(0, 4))
 
+        # Buttons zuerst von unten packen: so werden sie auch bei knapper Fensterhöhe nie abgeschnitten.
+        btns = ctk.CTkFrame(box, fg_color="transparent")
+        btns.pack(side="bottom", fill="x", padx=24, pady=(18, 22))
+        self._ok_btn = ctk.CTkButton(btns, text=ok_text, height=40, corner_radius=BTN_RADIUS,
+                                     fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=ON_ACCENT,
+                                     font=ui_font(13, "bold"), command=self._ok)
+        self._ok_btn.pack(side="right", width=160)
+        ctk.CTkButton(btns, text="Abbrechen", height=40, corner_radius=BTN_RADIUS, fg_color="transparent",
+                      hover_color=SURFACE2, text_color=MUTED, border_width=1, border_color=BORDER,
+                      font=ui_font(13), command=self.cancel).pack(side="right", padx=(0, 10), width=120)
+
         self._first = None
         for field in fields:
             ctk.CTkLabel(box, text=field["label"], font=ui_font(12), text_color=TEXT,
@@ -1524,16 +1778,6 @@ class PasswordDialog(ctk.CTkToplevel):
         self._err = ctk.CTkLabel(box, text="", font=ui_font(11), text_color=STATUS_ERR, anchor="w",
                                  justify="left", wraplength=350)
         self._err.pack(fill="x", padx=24, pady=(8, 0))
-
-        btns = ctk.CTkFrame(box, fg_color="transparent")
-        btns.pack(fill="x", padx=24, pady=(18, 22))
-        self._ok_btn = ctk.CTkButton(btns, text=ok_text, height=40, corner_radius=BTN_RADIUS,
-                                     fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=ON_ACCENT,
-                                     font=ui_font(13, "bold"), command=self._ok)
-        self._ok_btn.pack(side="right", width=160)
-        ctk.CTkButton(btns, text="Abbrechen", height=40, corner_radius=BTN_RADIUS, fg_color="transparent",
-                      hover_color=SURFACE2, text_color=MUTED, border_width=1, border_color=BORDER,
-                      font=ui_font(13), command=self.cancel).pack(side="right", padx=(0, 10), width=120)
 
         self.bind("<Return>", lambda e: self._ok())
         self.bind("<Escape>", lambda e: self.cancel())
@@ -1563,7 +1807,8 @@ class PasswordDialog(ctk.CTkToplevel):
 
     def _center(self, parent):
         self.update_idletasks()
-        w, h = max(440, self.winfo_reqwidth()), self.winfo_reqheight()
+        w, h = max(440, self.winfo_reqwidth()), self.winfo_reqheight() + 4
+        self.minsize(w, min(h, 320))
         try:
             px, py, pw, ph = (parent.winfo_rootx(), parent.winfo_rooty(),
                               parent.winfo_width(), parent.winfo_height())
@@ -1777,6 +2022,8 @@ class App(ctk.CTk):
         n = len(get_monitors())
         out = {}
         for k, iid in assign.items():
+            if iid == DESK_ID and not self.is_premium:
+                continue  # Premium-Desktop läuft nur für Premium-/Administratorkonten
             item = self.find_item(iid)
             if item and str(k).isdigit() and int(k) < n:
                 out[int(k)] = item
@@ -1810,6 +2057,11 @@ class App(ctk.CTk):
     @property
     def is_admin(self):
         return self.user.get("role") == "admin"
+
+    @property
+    def is_premium(self):
+        """Premium-Features: Administratoren immer, sonst das im Konto gesetzte Premium."""
+        return self.is_admin or bool(self.user.get("premium"))
 
     def _update_title(self):
         self.title(f"Wallura {APP_VERSION}" if self.guest
@@ -1894,6 +2146,8 @@ class App(ctk.CTk):
         self._nav[page] = {"btn": b, "bar": bar}
 
     def _show_page(self, page):
+        if page == "desk":
+            self._build_desk_page()  # bei jedem Öffnen neu: Premium kann sich geändert haben
         self._page = page
         for name, frame in self._pages.items():
             if name == page:
@@ -1934,6 +2188,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(side, text="MENÜ", font=self._font(9, "bold"), text_color=MUTED,
                      anchor="w").pack(fill="x", padx=20, pady=(4, 6))
         self._nav_btn(side, "Bibliothek", "library")
+        self._nav_btn(side, "Eigener Desktop", "desk")
         self._nav_btn(side, "Einstellungen", "settings")
 
         # Angemeldetes Konto
@@ -1952,8 +2207,11 @@ class App(ctk.CTk):
                      font=self._font(9, "bold"), text_color=MUTED, anchor="w").pack(fill="x")
         ctk.CTkLabel(uinfo, text=who, font=self._font(14, "bold"), text_color=TEXT,
                      anchor="w").pack(fill="x")
-        ctk.CTkLabel(uinfo, text="Ohne Konto" if self.guest else ROLES.get(self.user.get("role"), "Nutzer"),
-                     font=self._font(11), text_color=ACCENT if self.is_admin else MUTED,
+        role_text = ("Ohne Konto" if self.guest else ROLES.get(self.user.get("role"), "Nutzer"))
+        if not self.guest and self.is_premium and not self.is_admin:
+            role_text = "Premium"
+        ctk.CTkLabel(uinfo, text=role_text,
+                     font=self._font(11), text_color=ACCENT if self.is_premium else MUTED,
                      anchor="w").pack(fill="x")
         self._btn(usercard, "Anmelden" if self.guest else "Abmelden",
                   self.login if self.guest else self.logout,
@@ -2055,6 +2313,14 @@ class App(ctk.CTk):
         self.scroll = ctk.CTkScrollableFrame(lib, corner_radius=0, fg_color="transparent",
                                              scrollbar_button_color=BORDER, scrollbar_button_hover_color=MUTED)
         self.scroll.grid(row=2, column=0, sticky="nsew", pady=(2, 0))
+
+        # ---------- Seite: Eigener Desktop (Premium)
+        deskpage = ctk.CTkScrollableFrame(host, corner_radius=0, fg_color="transparent",
+                                          scrollbar_button_color=BORDER, scrollbar_button_hover_color=MUTED)
+        deskpage.grid(row=0, column=0, sticky="nsew")
+        self._desk_page = deskpage
+        self._desk_host = ctk.CTkFrame(deskpage, fg_color="transparent")
+        self._desk_host.pack(fill="x", padx=(0, 10))
 
         # ---------- Seite: Einstellungen
         sett = ctk.CTkScrollableFrame(host, corner_radius=0, fg_color="transparent",
@@ -2250,7 +2516,7 @@ class App(ctk.CTk):
                   font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
         ctk.CTkFrame(data, height=6, fg_color="transparent").pack()
 
-        self._pages = {"library": lib, "settings": sett}
+        self._pages = {"library": lib, "settings": sett, "desk": deskpage}
 
         # ---------- Player-Leiste unten: Status, Steuerung, Lautstärke
         bar = ctk.CTkFrame(main, fg_color=SURFACE, corner_radius=CARD_RADIUS)
@@ -2973,6 +3239,9 @@ class App(ctk.CTk):
 
     # -- Wallpaper steuern
     def apply(self, item):
+        if item.get("id") == DESK_ID and not self.is_premium:
+            self._require_premium()
+            return
         self.set_status(f"Starte „{shorten(item['title'], 40)}“ …")
         threading.Thread(target=self._apply_worker, args=(item,), daemon=True).start()
 
@@ -3014,6 +3283,247 @@ class App(ctk.CTk):
     def restart_current(self):
         if self.player.active:
             threading.Thread(target=lambda: self.player.apply(self._assign_items(), force=True), daemon=True).start()
+
+    # -- Eigener Desktop (Premium)
+    def _require_premium(self):
+        if self.is_premium:
+            return True
+        self.set_status("„Eigener Desktop“ ist ein Premium-Feature – ein Administrator kann dein Konto "
+                        "unter Einstellungen → Benutzer freischalten.", True)
+        return False
+
+    def _desk_cfg(self):
+        desk = self.cfg.get("desk")
+        if not isinstance(desk, dict):
+            desk = dict(DEFAULTS["desk"])
+            self.cfg["desk"] = desk
+        return desk
+
+    def _desk_changed(self):
+        save_config(self.cfg)
+        self._update_desk_preview()
+        if DESK_ID in self.cfg.get("assign", {}).values():
+            threading.Thread(target=lambda: self.player.apply(self._assign_items(), force=True),
+                             daemon=True).start()
+
+    def _desk_toggle(self, key, value):
+        self._desk_cfg()[key] = bool(value)
+        self._desk_changed()
+
+    def _desk_theme(self, label):
+        if label not in DESK_THEMES:
+            return
+        desk = self._desk_cfg()
+        desk["bg"] = ""
+        desk["theme"] = label
+        self._desk_changed()
+        self.after(10, self._build_desk_page)
+
+    def _desk_pos(self, label):
+        if label in DESK_POS:
+            self._desk_cfg()["pos"] = label
+            self._desk_changed()
+
+    def _desk_color(self, label):
+        if label in DESK_COLORS:
+            self._desk_cfg()["color"] = label
+            self._desk_changed()
+
+    def _desk_size(self, value):
+        size = max(32, min(140, int(float(value))))
+        self._desk_cfg()["size"] = size
+        lbl = getattr(self, "_desk_size_lbl", None)
+        if lbl is not None:
+            lbl.configure(text=f"{size} px")
+        if getattr(self, "_desk_size_job", None):
+            self.after_cancel(self._desk_size_job)
+        self._desk_size_job = self.after(350, self._desk_changed)
+
+    def _desk_text(self, value):
+        self._desk_cfg()["text"] = " ".join(str(value).split())[:80]
+        if getattr(self, "_desk_text_job", None):
+            self.after_cancel(self._desk_text_job)
+        self._desk_text_job = self.after(450, self._desk_changed)
+
+    def _desk_pick_background(self):
+        if not self._require_premium():
+            return
+        pats = " ".join(f"*{e}" for e in MEDIA_EXT)
+        path = filedialog.askopenfilename(title="Hintergrund für deinen Desktop wählen",
+                                          filetypes=[("Videos & Bilder", pats), ("Alle Dateien", "*.*")])
+        if not path:
+            return
+        self._desk_cfg()["bg"] = path
+        self._desk_changed()
+        self.after(10, self._build_desk_page)
+
+    def _desk_clear_background(self):
+        self._desk_cfg()["bg"] = ""
+        self._desk_changed()
+        self.after(10, self._build_desk_page)
+
+    def _update_desk_preview(self):
+        lbl = getattr(self, "_desk_preview", None)
+        if lbl is None:
+            return
+        try:
+            img = render_desk_image(self._desk_cfg(), (640, 360))
+            self._desk_preview_img = ctk.CTkImage(img, size=(640, 360))
+            lbl.configure(image=self._desk_preview_img, text="")
+        except Exception:
+            lbl.configure(text="Vorschau gerade nicht verfügbar", image=None)
+
+    def _build_desk_page(self):
+        host = getattr(self, "_desk_host", None)
+        if host is None:
+            return
+        for w in host.winfo_children():
+            w.destroy()
+        self._desk_preview = None
+        head = ctk.CTkFrame(host, fg_color="transparent")
+        head.pack(fill="x", pady=(0, 14))
+        title_row = ctk.CTkFrame(head, fg_color="transparent")
+        title_row.pack(anchor="w")
+        ctk.CTkLabel(title_row, text="Eigener Desktop", font=self._font(28, "bold"),
+                     text_color=TEXT).pack(side="left")
+        ctk.CTkLabel(title_row, text="PREMIUM", font=self._font(9, "bold"), fg_color=ACCENT,
+                     text_color=ON_ACCENT, corner_radius=7, height=19, width=66).pack(side="left", padx=(10, 0))
+        ctk.CTkLabel(head, text="Hintergrund, Uhr, Datum und eigener Text – dein Desktop, deine Regeln.",
+                     font=self._font(12), text_color=MUTED, anchor="w").pack(anchor="w", pady=(3, 0))
+
+        if not self.is_premium:
+            box = self._section(host, "Nur mit Premium oder Admin",
+                                "Premium-Features sind für Premium-Konten und Administratoren freigeschaltet.")
+            if self.guest:
+                msg = ("Du bist nicht angemeldet. Melde dich an – ein Administrator kann dein Konto "
+                       "anschließend auf Premium stellen.")
+            else:
+                msg = (f"Das Konto „{self.user.get('name', GAST)}“ ist kein Premium-Konto. Ein Administrator "
+                       "kann es unter Einstellungen → Benutzer mit einem Klick freischalten.")
+            ctk.CTkLabel(box, text=msg, font=self._font(12), text_color=MUTED, anchor="w", justify="left",
+                         wraplength=560).pack(fill="x", padx=20, pady=(0, 10))
+            row = ctk.CTkFrame(box, fg_color="transparent")
+            row.pack(fill="x", padx=20, pady=(0, 18))
+            if self.guest:
+                self._btn(row, "Anmelden", self.login, "primary", width=150, height=38).pack(side="left")
+            self._desk_preview = ctk.CTkLabel(box, text="")
+            self._desk_preview.pack(padx=20, pady=(0, 18))
+            self._update_desk_preview()
+            return
+
+        desk = self._desk_cfg()
+        bg = self._section(host, "Hintergrund", "Mitgelieferte Motive oder eine eigene Bild-/Videodatei.")
+        row = self._row(bg, "Motiv", "Anime, Auto, Natur und Neon sind offline schon dabei.")
+        values = list(DESK_THEMES) + (["Eigene Datei"] if desk.get("bg") else [])
+        self.desk_theme_menu = ctk.CTkOptionMenu(row, values=values, command=self._desk_theme, width=210,
+                                                 **self._menu_style())
+        self.desk_theme_menu.set("Eigene Datei" if desk.get("bg") else desk.get("theme", "Anime-Dämmerung"))
+        self.desk_theme_menu.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        row = self._row(bg, "Eigene Datei",
+                        shorten(desk.get("bg") or "Noch keine eigene Datei gewählt.", 70))
+        acts = ctk.CTkFrame(row, fg_color="transparent")
+        acts.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        self._btn(acts, "Datei wählen", self._desk_pick_background, "secondary", width=130, height=30,
+                  font=self._font(11)).pack(side="left", padx=2)
+        if desk.get("bg"):
+            self._btn(acts, "Entfernen", self._desk_clear_background, "ghost", width=100, height=30,
+                      font=self._font(11)).pack(side="left", padx=2)
+        self._desk_preview = ctk.CTkLabel(bg, text="")
+        self._desk_preview.pack(padx=20, pady=(4, 18))
+
+        ov = self._section(host, "Overlay", "Uhr, Datum und eigener Text – live über dem Hintergrund.")
+        self.sw_desk_clock = self._switch_row(ov, "Uhrzeit", "Große Digitaluhr, aktualisiert sich jede Sekunde.",
+                                              lambda: self._desk_toggle("clock", bool(self.sw_desk_clock.get())),
+                                              desk.get("clock", True))
+        self.sw_desk_date = self._switch_row(ov, "Datum", "Wochentag und Datum passend zur Uhr.",
+                                             lambda: self._desk_toggle("date", bool(self.sw_desk_date.get())),
+                                             desk.get("date", True))
+        row = self._row(ov, "Eigener Text", "z. B. dein Name, ein Zitat oder „Fokus“.")
+        self.desk_text_var = ctk.StringVar(value=desk.get("text", ""))
+        ctk.CTkEntry(row, textvariable=self.desk_text_var, width=260, height=34, corner_radius=BTN_RADIUS,
+                     fg_color=SURFACE2, border_color=BORDER, border_width=1, text_color=TEXT,
+                     font=self._font(12), placeholder_text="Optional").grid(row=0, column=1, sticky="e",
+                                                                             padx=(16, 0))
+        self.desk_text_var.trace_add("write", lambda *_: self._desk_text(self.desk_text_var.get()))
+        row = self._row(ov, "Position", "Ecke oder untere Mitte – frei wählbar.")
+        self.desk_pos_menu = ctk.CTkOptionMenu(row, values=list(DESK_POS), command=self._desk_pos, width=210,
+                                               **self._menu_style())
+        self.desk_pos_menu.set(desk.get("pos", "Unten links"))
+        self.desk_pos_menu.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        row = self._row(ov, "Farbe", "Schrift- und Uhrfarbe.")
+        self.desk_color_menu = ctk.CTkOptionMenu(row, values=list(DESK_COLORS), command=self._desk_color,
+                                                 width=210, **self._menu_style())
+        self.desk_color_menu.set(desk.get("color", "Weiß"))
+        self.desk_color_menu.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        row = self._row(ov, "Schriftgröße", "Größe der Uhr in Pixel (für 1080p).")
+        srow = ctk.CTkFrame(row, fg_color="transparent")
+        srow.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        self._desk_size_lbl = ctk.CTkLabel(srow, text=f"{int(desk.get('size', 72))} px", font=self._font(12),
+                                           text_color=MUTED, width=52, anchor="e")
+        self._desk_size_lbl.pack(side="right", padx=(8, 0))
+        ctk.CTkSlider(srow, from_=32, to=140, number_of_steps=108, command=self._desk_size, width=150,
+                      button_color=ACCENT, button_hover_color=ACCENT_HOVER, progress_color=ACCENT,
+                      fg_color=BORDER).pack(side="right")
+
+        acts = ctk.CTkFrame(host, fg_color="transparent")
+        acts.pack(fill="x", pady=(2, 10))
+        self._btn(acts, "Desktop anwenden", self.apply_desk, "primary", width=200, height=40).pack(side="left")
+        self._btn(acts, "Als Wallpaper speichern", self.export_desk, "secondary", width=210, height=40).pack(
+            side="left", padx=8)
+        if DESK_ID in self.cfg.get("assign", {}).values():
+            self._btn(acts, "Beenden", self.stop_desk, "ghost", width=120, height=40).pack(side="left")
+        ctk.CTkLabel(host, text="Tipp: „Als Wallpaper speichern“ legt ein fertiges Bild mit Uhr und Text "
+                                "in deiner Bibliothek ab.", font=self._font(11), text_color=MUTED,
+                     anchor="w").pack(fill="x", pady=(0, 12))
+        self._update_desk_preview()
+
+    def apply_desk(self):
+        if not self._require_premium():
+            return
+        src = desk_background_path(self._desk_cfg())
+        item = self.find_item(DESK_ID)
+        if item is None:
+            item = {"id": DESK_ID, "title": "Mein Desktop", "kind": "local", "src": src,
+                    "added": time.time(), "plays": 0}
+            self.cfg["items"].append(item)
+        item.update({"src": src, "kind": "local", "title": "Mein Desktop"})
+        save_config(self.cfg)
+        threading.Thread(target=lambda: (make_local_thumb(DESK_ID, src), self.ui(self.refresh_library)),
+                         daemon=True).start()
+        self.apply(item)
+
+    def stop_desk(self):
+        a = {k: v for k, v in self.cfg.get("assign", {}).items() if v != DESK_ID}
+        self.cfg["assign"] = a
+        save_config(self.cfg)
+        threading.Thread(target=lambda: (self.player.apply(self._assign_items(a)),
+                                         self.ui(self.refresh_library)), daemon=True).start()
+        self.set_status("Eigener Desktop beendet.")
+        self.after(10, self._build_desk_page)
+
+    def export_desk(self):
+        if not self._require_premium():
+            return
+        try:
+            img = render_desk_image(self._desk_cfg(), (1920, 1080))
+        except Exception as e:
+            self.set_status(f"Wallpaper ließ sich nicht erstellen: {e}", True)
+            return
+        title = "Mein Desktop " + time.strftime("%d.%m. %H-%M")
+        path = LIB_DIR / f"{title}.png"
+        try:
+            img.save(path)
+        except Exception as e:
+            self.set_status(f"Datei ließ sich nicht speichern: {e}", True)
+            return
+        item = {"id": uuid.uuid4().hex[:10], "title": title, "kind": "local", "src": str(path),
+                "added": time.time(), "plays": 0}
+        self.cfg["items"].append(item)
+        save_config(self.cfg)
+        threading.Thread(target=lambda: (make_local_thumb(item["id"], item["src"]),
+                                         self.ui(self.refresh_library)), daemon=True).start()
+        self.set_status(f"Wallpaper „{title}“ gespeichert – es liegt jetzt in der Bibliothek.")
+        self.toast("Wallpaper gespeichert")
 
     def next_wallpaper(self):
         items = self._playlist()
@@ -3417,7 +3927,8 @@ class App(ctk.CTk):
             self._login_open = False
         if not res:
             return
-        self.user = {"name": res["name"], "role": res.get("role", "user")}
+        self.user = {"name": res["name"], "role": res.get("role", "user"),
+                     "premium": bool(res.get("premium"))}
         self.guest = False
         self.acc = load_accounts()
         remembered = bool(res.get("remember")) and save_session(res["name"], True)
@@ -3550,6 +4061,21 @@ class App(ctk.CTk):
         self.set_status(f"„{user.get('name', key)}“ ist jetzt {ROLES[new_role]}." if ok else err, not ok)
         self._refresh_users()
 
+    def toggle_premium(self, key):
+        if not self._require_admin():
+            return
+        self.acc = load_accounts()
+        user = self.acc["users"].get(key)
+        if not user:
+            return
+        on = not bool(user.get("premium"))
+        ok, err = set_premium(self.acc, key, on)
+        name = user.get("name", key)
+        self.set_status(f"„{name}“ ist jetzt Premium." if ok else err, not ok)
+        self._refresh_users()
+        if getattr(self, "_page", "") == "desk":
+            self._build_desk_page()
+
     def remove_user(self, key):
         if not self._require_admin():
             return
@@ -3589,14 +4115,24 @@ class App(ctk.CTk):
             info.grid(row=0, column=0, sticky="w", padx=14, pady=8)
             ctk.CTkLabel(info, text=name + ("  (du)" if key == own else ""),
                          font=self._font(13, "bold"), text_color=TEXT, anchor="w").pack(anchor="w")
-            ctk.CTkLabel(info, text=ROLES.get(user.get("role"), "Nutzer"), font=self._font(11),
+            meta = ctk.CTkFrame(info, fg_color="transparent")
+            meta.pack(anchor="w")
+            ctk.CTkLabel(meta, text=ROLES.get(user.get("role"), "Nutzer"), font=self._font(11),
                          text_color=ACCENT if user.get("role") == "admin" else MUTED,
-                         anchor="w").pack(anchor="w")
+                         anchor="w").pack(side="left")
+            if user.get("premium") or user.get("role") == "admin":
+                ctk.CTkLabel(meta, text="PREMIUM", font=self._font(9, "bold"), fg_color=ACCENT,
+                             text_color=ON_ACCENT, corner_radius=6, height=16, width=62).pack(
+                    side="left", padx=(8, 0))
             btns = ctk.CTkFrame(row, fg_color="transparent")
             btns.grid(row=0, column=1, sticky="e", padx=10, pady=8)
             role_text = "Zum Nutzer" if user.get("role") == "admin" else "Zum Admin"
             self._btn(btns, role_text, lambda k=key: self.toggle_role(k), "ghost", width=104, height=28,
                       font=self._font(11)).pack(side="left", padx=2)
+            if user.get("role") != "admin":  # Admins sind immer Premium
+                self._btn(btns, "Kein Premium" if user.get("premium") else "Premium",
+                          lambda k=key: self.toggle_premium(k), "ghost", width=104, height=28,
+                          font=self._font(11)).pack(side="left", padx=2)
             self._btn(btns, "Passwort", lambda k=key: self.reset_user_password(k), "ghost", width=88,
                       height=28, font=self._font(11)).pack(side="left", padx=2)
             self._btn(btns, "Löschen", lambda k=key: self.remove_user(k), "danger", width=84, height=28,

@@ -32,7 +32,7 @@ py fetch_tools.py
 if errorlevel 1 goto fail
 
 echo [4/5] Wallura.exe bauen ...
-py -m PyInstaller --noconfirm --clean --onedir --windowed --name Wallura --icon wallura.ico --collect-all customtkinter --hidden-import pystray._win32 wallura.py
+py -m PyInstaller --noconfirm --clean --onedir --windowed --name Wallura --icon wallura.ico --add-data "assets;assets" --collect-all customtkinter --hidden-import pystray._win32 wallura.py
 if errorlevel 1 goto fail
 
 echo [5/5] Installer erstellen ...
