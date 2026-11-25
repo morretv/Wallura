@@ -50,7 +50,7 @@ APP_VERSION = "1.8.0"   # wird vom Build / GitHub-Workflow aus dem Release-Tag g
 # mit der Datei Wallura-Setup.exe liegen (Repo bzw. Releases müssen öffentlich sein).
 GITHUB_REPO = "MorreTv/Wallura"
 # Server für die zentrale Kontenliste (Code im Ordner "cloud/"). Leer = Konten bleiben nur lokal.
-CLOUD_URL = "https://wallura-konten-1jomkz-preview.freebuff.site"
+CLOUD_URL = "https://wallura-konten-1jomkz.freebuff.site"
 APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("APPDATA", str(APP_DIR))) / APP_NAME
 # Umzug von der alten Version: %APPDATA%\\LiveWall -> %APPDATA%\\Wallura (Einstellungen, Downloads, Tools)
