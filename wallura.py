@@ -29,6 +29,7 @@ import urllib.request
 import uuid
 import winreg
 from pathlib import Path
+import tkinter as tk
 from tkinter import filedialog
 
 import customtkinter as ctk
@@ -65,6 +66,26 @@ if _OLD_DIR.exists() and not DATA_DIR.exists():
         pass
 LIB_DIR = DATA_DIR / "downloads"
 THUMB_DIR = DATA_DIR / "thumbs"
+
+
+def log_exception(exc_type, exc, tb):
+    """Fehler auch ohne Konsole festhalten (%APPDATA%/Wallura/error.log)."""
+    try:
+        import traceback
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(DATA_DIR / "error.log", "a", encoding="utf-8") as fh:
+            fh.write(time.strftime("%Y-%m-%d %H:%M:%S\n"))
+            traceback.print_exception(exc_type, exc, tb, file=fh)
+            fh.write("\n")
+    except Exception:
+        pass
+    try:
+        sys.__excepthook__(exc_type, exc, tb)
+    except Exception:
+        pass
+
+
+sys.excepthook = log_exception
 TOOLS_USER = DATA_DIR / "tools"
 TOOLS_APP = APP_DIR / "tools"
 UPDATE_DIR = DATA_DIR / "update"
@@ -1790,9 +1811,13 @@ class LoginDialog(ctk.CTkToplevel):
         self.geometry(f"{w}x{h}+{px + max(0, (pw - w) // 2)}+{py + max(0, (ph - h) // 3)}")
 
 
-class PasswordDialog(ctk.CTkToplevel):
-    """Modaler Passwort-Dialog: prüft im Fenster und bleibt bei Fehlern offen.
-    .result ist None (abgebrochen) oder {key: wert}."""
+class PasswordDialog(tk.Toplevel):
+    """Modaler Passwort-Dialog auf Basis von reinem Tk.
+
+    Bewusst ohne CustomTkinter: Tk berechnet die Fenstergröße selbst aus dem
+    Inhalt. Dadurch können weder Felder noch Buttons abgeschnitten werden.
+    .result ist None (abgebrochen) oder {key: wert}.
+    """
 
     def __init__(self, parent, title, subtitle, fields, ok_text, validate):
         super().__init__(parent)
@@ -1801,70 +1826,77 @@ class PasswordDialog(ctk.CTkToplevel):
         self._validate = validate
         self._done = False
         self.title(title)
-        self.configure(fg_color=BG)
-        self.resizable(True, True)
+        self.configure(bg=BG)
         try:
             self.transient(parent)
         except Exception:
             pass
 
-        box = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=CARD_RADIUS)
-        box.pack(fill="both", expand=True, padx=16, pady=16)
+        card = tk.Frame(self, bg=SURFACE, highlightthickness=1, highlightbackground=BORDER)
+        card.pack(fill="both", expand=True, padx=14, pady=14)
 
-        # Fußzeile zuerst packen: Bestätigen/Abbrechen sind bei jeder Fenstergröße sichtbar.
-        btns = ctk.CTkFrame(box, fg_color="transparent")
-        btns.pack(side="bottom", fill="x", padx=24, pady=(12, 18))
-        self._ok_btn = ctk.CTkButton(btns, text=ok_text, height=40, corner_radius=BTN_RADIUS,
-                                     fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=ON_ACCENT,
-                                     font=ui_font(13, "bold"), command=self._ok)
-        self._ok_btn.pack(side="right", width=160)
-        ctk.CTkButton(btns, text="Abbrechen", height=40, corner_radius=BTN_RADIUS, fg_color="transparent",
-                      hover_color=SURFACE2, text_color=MUTED, border_width=1, border_color=BORDER,
-                      font=ui_font(13), command=self.cancel).pack(side="right", padx=(0, 10), width=120)
-
-        ctk.CTkLabel(box, text=title, font=ui_font(19, "bold"), text_color=TEXT,
-                     anchor="w").pack(fill="x", padx=24, pady=(22, 2))
-        ctk.CTkLabel(box, text=subtitle, font=ui_font(11), text_color=MUTED, anchor="w", justify="left",
-                     wraplength=360).pack(fill="x", padx=24, pady=(0, 6))
-
-        # Inhalt scrollbar: Felder können nie unter den Fensterrand rutschen.
-        body = ctk.CTkScrollableFrame(box, fg_color="transparent", corner_radius=0,
-                                      scrollbar_button_color=BORDER, scrollbar_button_hover_color=MUTED)
-        body.pack(fill="both", expand=True, padx=(18, 6))
-        inner = ctk.CTkFrame(body, fg_color="transparent")
-        inner.pack(fill="x")
+        tk.Label(card, text=title, bg=SURFACE, fg=TEXT, anchor="w",
+                 font=("Segoe UI", 14, "bold")).pack(fill="x", padx=18, pady=(16, 2))
+        if subtitle:
+            tk.Label(card, text=subtitle, bg=SURFACE, fg=MUTED, anchor="w", justify="left",
+                     wraplength=420, font=("Segoe UI", 9)).pack(fill="x", padx=18, pady=(0, 4))
 
         self._first = None
         for field in fields:
-            ctk.CTkLabel(inner, text=field["label"], font=ui_font(12), text_color=TEXT,
-                         anchor="w").pack(fill="x", padx=6, pady=(10, 4))
-            var = ctk.StringVar()
-            entry = ctk.CTkEntry(inner, textvariable=var, show="•", height=38, corner_radius=BTN_RADIUS,
-                                 fg_color=SURFACE2, border_color=BORDER, border_width=1,
-                                 text_color=TEXT, font=ui_font(13))
-            entry.pack(fill="x", padx=6)
+            tk.Label(card, text=field["label"], bg=SURFACE, fg=TEXT, anchor="w",
+                     font=("Segoe UI", 10)).pack(fill="x", padx=18, pady=(10, 2))
+            wrap = tk.Frame(card, bg=SURFACE2, highlightthickness=1, highlightbackground=BORDER)
+            wrap.pack(fill="x", padx=18)
+            var = tk.StringVar()
+            entry = tk.Entry(wrap, textvariable=var, show="•", bd=0, relief="flat",
+                             bg=SURFACE2, fg=TEXT, insertbackground=TEXT, font=("Segoe UI", 11))
+            entry.pack(fill="x", padx=8, pady=6)
+            entry.bind("<FocusIn>", lambda e, f=wrap: f.configure(highlightbackground=ACCENT))
+            entry.bind("<FocusOut>", lambda e, f=wrap: f.configure(highlightbackground=BORDER))
             self._entries.append(entry)
             if self._first is None:
                 self._first = entry
             self._vars[field["key"]] = var
 
-        self._show_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(inner, text="Passwort anzeigen", variable=self._show_var, command=self._toggle_show,
-                        font=ui_font(11), text_color=MUTED, fg_color=ACCENT, hover_color=ACCENT_HOVER,
-                        border_color=BORDER, checkbox_width=17, checkbox_height=17).pack(
-            fill="x", padx=6, pady=(10, 0))
+        self._show_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(card, text="Passwort anzeigen", variable=self._show_var,
+                       command=self._toggle_show, bg=SURFACE, fg=MUTED, activebackground=SURFACE,
+                       activeforeground=TEXT, selectcolor=SURFACE2, highlightthickness=0, bd=0,
+                       anchor="w", font=("Segoe UI", 9)).pack(fill="x", padx=15, pady=(8, 0))
 
-        self._err = ctk.CTkLabel(inner, text="", font=ui_font(11), text_color=STATUS_ERR, anchor="w",
-                                 justify="left", wraplength=360)
-        self._err.pack(fill="x", padx=6, pady=(8, 6))
+        self._err = tk.Label(card, text="", bg=SURFACE, fg=STATUS_ERR, anchor="w", justify="left",
+                             wraplength=420, font=("Segoe UI", 9))
+        self._err.pack(fill="x", padx=18, pady=(6, 0))
+
+        row = tk.Frame(card, bg=SURFACE)
+        row.pack(fill="x", padx=18, pady=(12, 14))
+        tk.Button(row, text=ok_text, command=self._ok, bd=0, relief="flat", cursor="hand2",
+                  bg=ACCENT, fg=ON_ACCENT, activebackground=ACCENT_HOVER, activeforeground=ON_ACCENT,
+                  font=("Segoe UI", 10, "bold"), padx=18, pady=7).pack(side="right")
+        tk.Button(row, text="Abbrechen", command=self.cancel, bd=0, relief="flat", cursor="hand2",
+                  bg=SURFACE2, fg=MUTED, activebackground=BORDER, activeforeground=TEXT,
+                  font=("Segoe UI", 10), padx=14, pady=7).pack(side="right", padx=(0, 8))
 
         self.bind("<Return>", lambda e: self._ok())
         self.bind("<Escape>", lambda e: self.cancel())
-        self._center(parent)
-        self.after(120, self._fit_content)
-        self.after(400, self._fit_content)
-        self.after(900, self._fit_content)
-        self.after(150, self._activate)
+        try:
+            self.protocol("WM_DELETE_WINDOW", self.cancel)
+        except Exception:
+            pass
+
+        # Größe NICHT setzen: Tk nimmt die angeforderte Größe des Inhalts und
+        # wächst mit, wenn z. B. eine Fehlermeldung mehr Zeilen braucht.
+        self.update_idletasks()
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        try:
+            px, py, pw, ph = (parent.winfo_rootx(), parent.winfo_rooty(),
+                              parent.winfo_width(), parent.winfo_height())
+        except Exception:
+            px, py, pw, ph = 0, 0, self.winfo_screenwidth(), self.winfo_screenheight()
+        x = max(0, min(px + max(0, (pw - w) // 2), self.winfo_screenwidth() - w - 20))
+        y = max(0, min(py + max(0, (ph - h) // 3), self.winfo_screenheight() - h - 40))
+        self.geometry(f"+{x}+{y}")
+        self.after(30, self._activate)
 
     def _toggle_show(self):
         show = "" if self._show_var.get() else "•"
@@ -1886,49 +1918,6 @@ class PasswordDialog(ctk.CTkToplevel):
             pass
         if self._first is not None:
             self._first.focus_set()
-
-    def _scale(self):
-        try:
-            return max(1.0, float(self._get_window_scaling()))
-        except Exception:
-            return 1.0
-
-    def _wanted_height(self):
-        """Nie auf die (DPI-abhängig ungenaue) Wunschgröße verlassen: pro Feld großzügig Platz."""
-        floor = (380 + 96 * max(1, len(self._entries))) * self._scale()
-        return max(self.winfo_reqheight() + 20, int(floor))
-
-    def _center(self, parent):
-        self.update_idletasks()
-        w, h = max(int(470 * self._scale()), self.winfo_reqwidth()), self._wanted_height()
-        w = min(w, self.winfo_screenwidth() - 40)
-        self.minsize(w, int(340 * self._scale()))
-        try:
-            px, py, pw, ph = (parent.winfo_rootx(), parent.winfo_rooty(),
-                              parent.winfo_width(), parent.winfo_height())
-        except Exception:
-            px, py, pw, ph = 0, 0, self.winfo_screenwidth(), self.winfo_screenheight()
-        h = min(h, self.winfo_screenheight() - 80)
-        self.geometry(f"{w}x{h}+{px + max(0, (pw - w) // 2)}+{py + max(0, (ph - h) // 3)}")
-
-    def _fit_content(self):
-        """Messt die tatsächliche Lage der Kinder und vergrößert das Fenster, falls etwas herausragt."""
-        try:
-            self.update_idletasks()
-            kids = self.winfo_children()
-            if not kids:
-                return
-            box = kids[0]
-            bottom = 0
-            for child in box.winfo_children():
-                if child.winfo_ismapped():
-                    bottom = max(bottom, child.winfo_y() + child.winfo_height())
-            need = max(self._wanted_height(), bottom + 2 * max(0, box.winfo_y()) + 10)
-            if need > self.winfo_height() + 2:
-                self.geometry(f"{self.winfo_width()}x{min(need, self.winfo_screenheight() - 60)}+"
-                              f"{self.winfo_x()}+{self.winfo_y()}")
-        except Exception:
-            pass
 
     def _ok(self):
         if self._done:
@@ -2128,6 +2117,11 @@ class LibraryPickerDialog(ctk.CTkToplevel):
 
 
 class App(ctk.CTk):
+
+    def report_callback_exception(self, exc, val, tb):
+        # Ohne Konsole würde ein Fehler in einem Button-Callback sonst
+        # spurlos verschwinden und ein halb aufgebautes Fenster zurücklassen.
+        log_exception(exc, val, tb)
     def __init__(self, session=None, start_hidden=False):
         super().__init__()
         self.user = session or {"name": GAST, "role": "user"}
