@@ -59,14 +59,22 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Das Windows-Release wird vom Release-Workflow erstellt – kurz darauf warten.
-          for i in $(seq 1 40); do
-            if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
-              gh release upload "$GITHUB_REF_NAME" Wallura.apk --clobber
-              echo "Wallura.apk am Release $GITHUB_REF_NAME."
-              exit 0
+          # Das Windows-Release wird vom Release-Workflow erstellt. Erst warten, bis es
+          # veröffentlicht (nicht mehr Entwurf) ist, dann den Upload mehrfach versuchen:
+          # direkt nach dem Veröffentlichen kann der Upload noch abgelehnt werden.
+          for i in $(seq 1 60); do
+            if gh release view "$GITHUB_REF_NAME" --json isDraft > /tmp/release.json 2>/dev/null \
+               && grep -q '"isDraft":false' /tmp/release.json; then
+              for try in 1 2 3 4 5; do
+                if gh release upload "$GITHUB_REF_NAME" Wallura.apk --clobber; then
+                  echo "Wallura.apk am Release $GITHUB_REF_NAME."
+                  exit 0
+                fi
+                echo "Upload fehlgeschlagen, neuer Versuch ($try/5) …"
+                sleep 10
+              done
             fi
-            echo "Warte auf das Release $GITHUB_REF_NAME ($i/40) …"
+            echo "Warte auf das Release $GITHUB_REF_NAME ($i/60) …"
             sleep 10
           done
           echo "Release $GITHUB_REF_NAME wurde nicht erstellt – Windows-Build prüfen." >&2
