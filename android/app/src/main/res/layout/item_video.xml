@@ -46,6 +46,13 @@
             android:orientation="horizontal">
 
             <TextView
+                android:id="@+id/video_fav"
+                style="@style/PillGhost"
+                android:layout_marginRight="5dp"
+                android:text="☆"
+                android:textSize="11sp" />
+
+            <TextView
                 android:id="@+id/video_pick"
                 style="@style/PillPrimary"
                 android:text="Auswählen"

@@ -207,6 +207,14 @@
                         android:text="＋ Datei" />
                 </LinearLayout>
 
+                <LinearLayout
+                    android:id="@+id/lib_filter"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal" />
+
                 <ScrollView
                     android:layout_width="match_parent"
                     android:layout_height="0dp"

@@ -15,6 +15,7 @@ import io
 import json
 import os
 import queue
+import random
 import re
 import shutil
 import subprocess
@@ -42,7 +43,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 # ----------------------------------------------------------------------------- Pfade
 APP_NAME = "Wallura"
 COPYRIGHT = "© 2026 MorreTv. Open Source (MIT)"
-APP_VERSION = "1.1.0"   # wird vom Build / GitHub-Workflow aus dem Release-Tag gesetzt
+APP_VERSION = "1.7.0"   # wird vom Build / GitHub-Workflow aus dem Release-Tag gesetzt
 # GitHub-Repo für automatische Updates ("benutzername/repo"). Dort muss pro Version ein Release
 # mit der Datei Wallura-Setup.exe liegen (Repo bzw. Releases müssen öffentlich sein).
 GITHUB_REPO = "MorreTv/Wallura"
@@ -100,9 +101,11 @@ YT_ID_RE = re.compile(r"(?:v=|youtu\.be/|/shorts/|/embed/|/live/)([A-Za-z0-9_-]{
 FIT_MAP = {"Füllen (zuschneiden)": "cover", "Einpassen (Balken)": "contain", "Strecken": "stretch"}
 QUALITIES = ["720", "1080", "1440", "2160"]
 FPS_MAP = {"Original": 0, "60 FPS": 60, "30 FPS": 30}
+ROTATE_MAP = {"Aus": 0, "Alle 5 Minuten": 5, "Alle 15 Minuten": 15, "Alle 30 Minuten": 30,
+              "Jede Stunde": 60, "Alle 3 Stunden": 180}
 BELOW_NORMAL_PRIORITY = 0x00004000
 KIND_LABEL = {"local": "Lokal", "youtube": "YouTube", "web": "Web"}
-KIND_FILTER = {"Alle": None, "Lokal": "local", "YouTube": "youtube", "Web": "web"}
+KIND_FILTER = {"Alle": None, "★ Favoriten": "fav", "Lokal": "local", "YouTube": "youtube", "Web": "web"}
 
 DEFAULTS = {
     "items": [],
@@ -113,6 +116,7 @@ DEFAULTS = {
     "monitor": "all",
     "quality": "1080",
     "fps_limit": 30,
+    "rotate_min": 0,     # automatischer Wechsel in Minuten (0 = aus)
     "pause_fullscreen": True,
     "autostart": False,
     "auto_update": True,
@@ -201,6 +205,11 @@ def load_config():
     except (TypeError, ValueError):
         fps = DEFAULTS["fps_limit"]
     cfg["fps_limit"] = fps if fps in FPS_MAP.values() else DEFAULTS["fps_limit"]
+    try:
+        rot = int(cfg.get("rotate_min", 0))
+    except (TypeError, ValueError):
+        rot = 0
+    cfg["rotate_min"] = rot if rot in ROTATE_MAP.values() else DEFAULTS["rotate_min"]
     cfg["monitor"] = str(cfg.get("monitor") or "all")
     cfg["update_repo"] = cfg["update_repo"] if isinstance(cfg.get("update_repo"), str) else ""
     for key in ("pause_fullscreen", "autostart", "auto_update"):
@@ -1410,6 +1419,7 @@ class App(ctk.CTk):
         self._volume_job = None
         self._downloads = set()
         self._update_lock = threading.Lock()
+        self._rotate_job = None
 
         self._build_ui()
         self.refresh_library()
@@ -1426,6 +1436,7 @@ class App(ctk.CTk):
         if self._assign_items():
             threading.Thread(target=self._startup_worker, args=(start_hidden,), daemon=True).start()
         cleanup_old_updates()
+        self._schedule_rotate()
         self.after(20000, self._auto_check)
 
     def _startup_worker(self, boot=False):
@@ -1696,6 +1707,8 @@ class App(ctk.CTk):
             font=self._font(12), height=30, corner_radius=8)
         self.kind_filter.set("Alle")
         self.kind_filter.pack(side="left")
+        self._btn(frow, "🎲  Zufällig", self.random_wallpaper, "secondary", width=130, height=30,
+                  font=self._font(12)).pack(side="right")
 
         self.scroll = ctk.CTkScrollableFrame(lib, corner_radius=0, fg_color="transparent",
                                              scrollbar_button_color=BORDER, scrollbar_button_hover_color=MUTED)
@@ -1745,6 +1758,12 @@ class App(ctk.CTk):
                                           **self._menu_style())
         self.fps_menu.set(next((k for k, v in FPS_MAP.items() if v == self.cfg.get("fps_limit", 30)), "30 FPS"))
         self.fps_menu.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        row = self._row(play, "Automatisch wechseln",
+                        "Wechselt das Wallpaper in festem Abstand – mit Favoriten als Playlist.")
+        self.rot_menu = ctk.CTkOptionMenu(row, values=list(ROTATE_MAP), command=self.on_rotate, width=200,
+                                          **self._menu_style())
+        self.rot_menu.set(next((k for k, v in ROTATE_MAP.items() if v == self.cfg.get("rotate_min", 0)), "Aus"))
+        self.rot_menu.grid(row=0, column=1, sticky="e", padx=(16, 0))
         row = self._row(play, "Max. Qualität (Streams, p)", "Gilt für YouTube/Web-Links und Downloads.")
         self.q_menu = ctk.CTkOptionMenu(row, values=QUALITIES, command=self.on_quality, width=200,
                                         **self._menu_style())
@@ -1919,8 +1938,7 @@ class App(ctk.CTk):
         n_items = len(self.cfg["items"])
         q = self.search_var.get().strip().lower()
         kind = KIND_FILTER.get(self.kind_filter.get())
-        shown = [it for it in self.cfg["items"]
-                 if (not q or q in str(it.get("title", "")).lower()) and (not kind or it["kind"] == kind)]
+        shown = self._visible_items()
         filtering = bool(q or kind)
         if not n_items:
             self.count_lbl.configure(text="")
@@ -1973,12 +1991,84 @@ class App(ctk.CTk):
         self._btn(row, "▶  Anwenden", lambda it=item: self.apply(it), "secondary" if active else "primary",
                   height=32, width=10, font=self._font(12, "bold")).grid(row=0, column=0, sticky="we")
         col = 1
+        self._btn(row, "★" if item.get("fav") else "☆", lambda it=item: self.toggle_favorite(it),
+                  "ghost", width=32, height=32,
+                  text_color=ACCENT if item.get("fav") else MUTED).grid(row=0, column=col, padx=(6, 0))
+        col += 1
         if item["kind"] != "local":
             self._btn(row, "⬇", lambda it=item: self.download(it), "ghost", width=32, height=32).grid(
                 row=0, column=col, padx=(6, 0))
             col += 1
         self._btn(row, "✕", lambda it=item: self.remove(it), "ghost", width=32, height=32,
                   hover_color="#3a1c1f").grid(row=0, column=col, padx=(6, 0))
+
+    # -- Favoriten, Zufall und automatischer Wechsel
+    def _visible_items(self):
+        """Wallpaper, die gerade in der Bibliothek sichtbar sind (Suche + Filter)."""
+        q = self.search_var.get().strip().lower()
+        kind = KIND_FILTER.get(self.kind_filter.get())
+        out = []
+        for it in self.cfg["items"]:
+            if q and q not in str(it.get("title", "")).lower():
+                continue
+            if kind == "fav":
+                if not it.get("fav"):
+                    continue
+            elif kind and it["kind"] != kind:
+                continue
+            out.append(it)
+        return out
+
+    def toggle_favorite(self, item):
+        item["fav"] = not bool(item.get("fav"))
+        save_config(self.cfg)
+        self.refresh_library()
+        self.set_status(f"{'Zu Favoriten hinzugefügt' if item['fav'] else 'Aus Favoriten entfernt'}: "
+                        f"{shorten(item['title'], 40)}")
+
+    def random_wallpaper(self):
+        """Ein zufälliges Wallpaper aus der aktuellen Auswahl (Filter/Suche)."""
+        items = self._visible_items()
+        if not items:
+            self.set_status("Keine Wallpaper in der aktuellen Auswahl.", True)
+            return
+        self.apply(random.choice(items))
+
+    def rotate_now(self):
+        """Nächstes Wallpaper der aktuellen Auswahl – für den automatischen Wechsel."""
+        items = self._visible_items()
+        if not items:
+            return
+        idxs = self._target_indices()
+        cur = self.cfg.get("assign", {}).get(str(idxs[0])) if idxs else None
+        ids = [i["id"] for i in items]
+        self.apply(items[(ids.index(cur) + 1) % len(items)] if cur in ids else items[0])
+
+    def _schedule_rotate(self):
+        if self._rotate_job is not None:
+            try:
+                self.after_cancel(self._rotate_job)
+            except Exception:
+                pass
+            self._rotate_job = None
+        minutes = int(self.cfg.get("rotate_min", 0) or 0)
+        if minutes > 0 and not self._closing:
+            self._rotate_job = self.after(minutes * 60 * 1000, self._rotate_tick)
+
+    def _rotate_tick(self):
+        self._rotate_job = None
+        if self._closing:
+            return
+        if not fullscreen_app_active():  # nicht in Spiele / Vollbild-Apps hineinwechseln
+            self.rotate_now()
+        self._schedule_rotate()
+
+    def on_rotate(self, label):
+        self.cfg["rotate_min"] = ROTATE_MAP.get(label, 0)
+        save_config(self.cfg)
+        self._schedule_rotate()
+        self.set_status(f"Automatischer Wechsel: {label}." if self.cfg["rotate_min"]
+                        else "Automatischer Wechsel aus.")
 
     # -- Hinzufügen / Entfernen
     def add_local(self):
@@ -2606,6 +2696,7 @@ class App(ctk.CTk):
                              lambda: self.ui(self.install_update),
                              visible=lambda item: bool(self.update_file)),
             pystray.MenuItem("Nächstes Wallpaper", lambda: self.ui(self.next_wallpaper)),
+            pystray.MenuItem("🎲 Zufälliges Wallpaper", lambda: self.ui(self.random_wallpaper)),
             pystray.MenuItem("Wallpaper stoppen", lambda: self.ui(self.stop_wallpaper)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Beenden", lambda: self.ui(self.quit_app)),

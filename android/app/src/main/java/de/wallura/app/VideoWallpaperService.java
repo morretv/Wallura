@@ -6,6 +6,8 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.media.MediaPlayer;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.service.wallpaper.WallpaperService;
 import android.view.SurfaceHolder;
 
@@ -40,6 +42,48 @@ public class VideoWallpaperService extends WallpaperService {
         private boolean stopped;
         private boolean listening;
 
+        private final Handler rotateHandler = new Handler(Looper.getMainLooper());
+
+        /** Automatischer Wechsel: nach der eingestellten Zeit das nächste Video zeigen. */
+        private final Runnable rotate = new Runnable() {
+            @Override
+            public void run() {
+                int minutes = Library.rotateMinutes(VideoWallpaperService.this);
+                if (minutes <= 0 || stopped) {
+                    return;
+                }
+                if (!paused && holder != null) {
+                    List<File> videos = Library.videos(VideoWallpaperService.this);
+                    if (videos.size() > 1) {
+                        File active = Library.activeFile(VideoWallpaperService.this);
+                        String activePath = active == null ? null : active.getAbsolutePath();
+                        int next = 0;
+                        for (int i = 0; i < videos.size(); i++) {
+                            if (videos.get(i).getAbsolutePath().equals(activePath)) {
+                                next = (i + 1) % videos.size();
+                                break;
+                            }
+                        }
+                        Library.setActive(VideoWallpaperService.this, videos.get(next).getAbsolutePath());
+                        stop();
+                        start();
+                    }
+                }
+                rotateHandler.postDelayed(this, minutes * 60_000L);
+            }
+        };
+
+        private void scheduleRotation() {
+            rotateHandler.removeCallbacks(rotate);
+            if (stopped || paused) {
+                return;
+            }
+            int minutes = Library.rotateMinutes(VideoWallpaperService.this);
+            if (minutes > 0) {
+                rotateHandler.postDelayed(rotate, minutes * 60_000L);
+            }
+        }
+
         private final BroadcastReceiver commands = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
@@ -48,8 +92,7 @@ public class VideoWallpaperService extends WallpaperService {
                     cmd = CMD_RELOAD;
                 }
                 switch (cmd) {
-                    case CMD_PAUSE:
-                        paused = true;
+                    case CMD_PAUSE:                        paused = true;
                         if (player != null) {
                             try {
                                 player.pause();
@@ -77,6 +120,7 @@ public class VideoWallpaperService extends WallpaperService {
                         start();
                         break;
                 }
+                scheduleRotation();
             }
         };
 
@@ -100,6 +144,7 @@ public class VideoWallpaperService extends WallpaperService {
 
         @Override
         public void onDestroy() {
+            rotateHandler.removeCallbacks(rotate);
             if (listening) {
                 try {
                     VideoWallpaperService.this.unregisterReceiver(commands);
@@ -116,6 +161,7 @@ public class VideoWallpaperService extends WallpaperService {
             super.onSurfaceCreated(surfaceHolder);
             holder = surfaceHolder;
             start();
+            scheduleRotation();
         }
 
         @Override
@@ -130,8 +176,10 @@ public class VideoWallpaperService extends WallpaperService {
             super.onVisibilityChanged(visible);
             if (visible) {
                 start();
+                scheduleRotation();
             } else {
                 stop();
+                rotateHandler.removeCallbacks(rotate);
             }
         }
 

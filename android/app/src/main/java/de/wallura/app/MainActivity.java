@@ -23,6 +23,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.List;
 import java.util.Locale;
+import java.util.Random;
 
 /** Bibliothek, Einstellungen und Wiedergabe – Aufbau und Farben wie am PC. */
 public class MainActivity extends Activity {
@@ -34,6 +35,7 @@ public class MainActivity extends Activity {
     private EditText search;
     private LinearLayout list;
     private LinearLayout settings;
+    private LinearLayout filterRow;
     private TextView sideActive;
     private SeekBar volume;
     private TextView volumeLabel;
@@ -46,6 +48,7 @@ public class MainActivity extends Activity {
 
     private String version = "";
     private boolean paused;
+    private boolean favoritesOnly;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -58,6 +61,7 @@ public class MainActivity extends Activity {
         count = findViewById(R.id.lib_count);
         search = findViewById(R.id.lib_search);
         list = findViewById(R.id.lib_list);
+        filterRow = findViewById(R.id.lib_filter);
         settings = findViewById(R.id.settings_container);
         sideActive = findViewById(R.id.side_active);
         volume = findViewById(R.id.volume);
@@ -127,6 +131,7 @@ public class MainActivity extends Activity {
             }
         });
 
+        buildFilters();
         buildSettings();
         showPage("library");
         refresh();
@@ -137,9 +142,12 @@ public class MainActivity extends Activity {
     // ---------------------------------------------------------------- Bibliothek
 
     private void refresh() {
-        List<File> filtered = Library.videos(this, search.getText().toString());
+        String query = search.getText().toString();
+        List<File> filtered = Library.videos(this, query, favoritesOnly);
         int total = Library.videos(this).size();
-        count.setText(total == 1 ? "1 Wallpaper" : total + " Wallpaper");
+        count.setText(favoritesOnly || !query.trim().isEmpty()
+                ? filtered.size() + " von " + total + " Wallpaper"
+                : (total == 1 ? "1 Wallpaper" : total + " Wallpaper"));
 
         File active = Library.activeFile(this);
         String activePath = active == null ? null : active.getAbsolutePath();
@@ -151,7 +159,8 @@ public class MainActivity extends Activity {
         if (filtered.isEmpty()) {
             String hint = total == 0
                     ? "Noch keine Videos. Tippe auf „＋ Datei“ und wähle ein Video von deinem Handy."
-                    : "Kein Treffer für „" + search.getText().toString().trim() + "“.";
+                    : favoritesOnly ? "Noch keine Favoriten – tippe in der Liste auf ☆."
+                    : "Kein Treffer für „" + query.trim() + "“.";
             TextView empty = Ui.text(this, hint, 11, Ui.col(this, R.color.muted), false);
             empty.setPadding(0, Ui.dp(this, 12), 0, Ui.dp(this, 12));
             list.addView(empty);
@@ -169,6 +178,16 @@ public class MainActivity extends Activity {
                     String.format(Locale.GERMANY, "%.1f MB", file.length() / (1024.0 * 1024.0))
                             + (isActive ? "  ·  aktiv" : ""));
             Thumbs.load(this, file, (ImageView) row.findViewById(R.id.video_thumb));
+
+            final boolean favorite = Library.isFavorite(this, file);
+            final TextView star = row.findViewById(R.id.video_fav);
+            star.setText(favorite ? "★" : "☆");
+            star.setTextColor(Ui.col(this, favorite ? R.color.accent : R.color.muted));
+            star.setOnClickListener(v -> {
+                boolean now = Library.toggleFavorite(this, file);
+                refresh();
+                setStatus(now ? "Zu Favoriten hinzugefügt." : "Aus Favoriten entfernt.");
+            });
 
             final TextView pick = row.findViewById(R.id.video_pick);
             pick.setText(isActive ? "Aktiv" : "Auswählen");
@@ -199,6 +218,59 @@ public class MainActivity extends Activity {
 
             list.addView(row);
         }
+    }
+
+    /** Filter-Chips (Alle / Favoriten) und Zufalls-Button über der Liste. */
+    private void buildFilters() {
+        filterRow.removeAllViews();
+
+        TextView all = Ui.pill(this, "Alle", favoritesOnly ? Ui.CHIP_OFF : Ui.CHIP_ON);
+        all.setOnClickListener(v -> {
+            favoritesOnly = false;
+            buildFilters();
+            refresh();
+        });
+        filterRow.addView(all);
+
+        TextView favs = Ui.pill(this, "★ Favoriten", favoritesOnly ? Ui.CHIP_ON : Ui.CHIP_OFF);
+        favs.setOnClickListener(v -> {
+            favoritesOnly = true;
+            buildFilters();
+            refresh();
+        });
+        LinearLayout.LayoutParams favParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        favParams.leftMargin = Ui.dp(this, 5);
+        filterRow.addView(favs, favParams);
+
+        View spacer = new View(this);
+        filterRow.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1f));
+
+        TextView shuffle = Ui.pill(this, "🎲 Zufällig", Ui.SECONDARY);
+        shuffle.setOnClickListener(v -> randomWallpaper());
+        filterRow.addView(shuffle);
+    }
+
+    private void randomWallpaper() {
+        List<File> videos = Library.videos(this, search.getText().toString(), favoritesOnly);
+        if (videos.isEmpty()) {
+            setStatus("Keine Wallpaper in der aktuellen Auswahl.", true);
+            return;
+        }
+        File pick = videos.get(new Random().nextInt(videos.size()));
+        Library.setActive(this, pick.getAbsolutePath());
+        paused = false;
+        btnPause.setText("Pause");
+        sendCommand(VideoWallpaperService.CMD_RELOAD);
+        refresh();
+        setStatus("Zufällig gewählt: " + pick.getName());
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // Das Wallpaper kann sich (automatischer Wechsel) auch ohne die App geändert haben.
+        refresh();
     }
 
     private void pickVideo() {
@@ -331,6 +403,37 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         chipsParams.bottomMargin = Ui.dp(this, 6);
         play.addView(chips, chipsParams);
+
+        Ui.block(this, play, "Automatisch wechseln",
+                "Wechselt das Wallpaper in festem Abstand – auch auf dem Homescreen.");
+        LinearLayout rotChips = new LinearLayout(this);
+        rotChips.setOrientation(LinearLayout.HORIZONTAL);
+        int[] minutes = {0, 5, 15, 30, 60};
+        String[] rotLabels = {"Aus", "5 Min", "15 Min", "30 Min", "1 Std"};
+        int currentRotate = Library.rotateMinutes(this);
+        for (int i = 0; i < minutes.length; i++) {
+            final int value = minutes[i];
+            TextView chip = Ui.pill(this, rotLabels[i],
+                    value == currentRotate ? Ui.CHIP_ON : Ui.CHIP_OFF);
+            chip.setOnClickListener(v -> {
+                Library.setRotateMinutes(this, value);
+                sendCommand(VideoWallpaperService.CMD_RELOAD);
+                buildSettings();
+                setStatus(value == 0 ? "Automatischer Wechsel aus."
+                        : "Automatischer Wechsel alle " + value + " Minuten.");
+            });
+            LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            if (i > 0) {
+                chipParams.leftMargin = Ui.dp(this, 5);
+            }
+            rotChips.addView(chip, chipParams);
+        }
+        LinearLayout.LayoutParams rotParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        rotParams.bottomMargin = Ui.dp(this, 6);
+        play.addView(rotChips, rotParams);
+
         Ui.block(this, play, "Lautstärke", "Ton des Wallpapers – 0 % ist stumm (unten in der Leiste).");
 
         LinearLayout wall = Ui.section(this, settings, "Wallpaper");

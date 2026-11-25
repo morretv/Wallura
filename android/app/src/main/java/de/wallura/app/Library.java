@@ -5,7 +5,9 @@ import android.content.SharedPreferences;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /** Ablage der importierten Videos und die Einstellungen des Wallpapers. */
 final class Library {
@@ -13,6 +15,8 @@ final class Library {
     static final String KEY_ACTIVE = "active";
     static final String KEY_VOLUME = "volume";
     static final String KEY_FIT = "fit";
+    static final String KEY_FAV = "favorites";
+    static final String KEY_ROTATE = "rotate_min";
 
     static final String FIT_COVER = "cover";
     static final String FIT_CONTAIN = "contain";
@@ -74,6 +78,58 @@ final class Library {
         return out;
     }
 
+    /** Nur die Favoriten aus einer (ggf. gefilterten) Liste. */
+    static List<File> videos(Context c, String query, boolean favoritesOnly) {
+        List<File> all = videos(c, query);
+        if (!favoritesOnly) {
+            return all;
+        }
+        Set<String> favs = favorites(c);
+        List<File> out = new ArrayList<>();
+        for (File f : all) {
+            if (favs.contains(f.getName())) {
+                out.add(f);
+            }
+        }
+        return out;
+    }
+
+    static Set<String> favorites(Context c) {
+        Set<String> out = new HashSet<>();
+        Set<String> raw = prefs(c).getStringSet(KEY_FAV, null);
+        if (raw != null) {
+            out.addAll(raw);
+        }
+        return out;
+    }
+
+    static boolean isFavorite(Context c, File file) {
+        return favorites(c).contains(file.getName());
+    }
+
+    /** Schaltet den Favoriten-Stern um. -> true, wenn das Video jetzt Favorit ist. */
+    static boolean toggleFavorite(Context c, File file) {
+        Set<String> favs = favorites(c);
+        boolean on;
+        if (favs.remove(file.getName())) {
+            on = false;
+        } else {
+            favs.add(file.getName());
+            on = true;
+        }
+        prefs(c).edit().putStringSet(KEY_FAV, favs).apply();
+        return on;
+    }
+
+    /** Automatischer Wechsel in Minuten (0 = aus). */
+    static int rotateMinutes(Context c) {
+        return Math.max(0, prefs(c).getInt(KEY_ROTATE, 0));
+    }
+
+    static void setRotateMinutes(Context c, int minutes) {
+        prefs(c).edit().putInt(KEY_ROTATE, Math.max(0, minutes)).apply();
+    }
+
     static long totalBytes(Context c) {
         long total = 0;
         for (File f : videos(c)) {
@@ -125,6 +181,7 @@ final class Library {
             }
         }
         setActive(c, null);
+        prefs(c).edit().remove(KEY_FAV).apply();
         File[] thumbs = new File(c.getCacheDir(), "thumbs").listFiles();
         if (thumbs != null) {
             for (File f : thumbs) {

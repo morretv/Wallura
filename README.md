@@ -27,8 +27,11 @@ Optional: `ffmpeg` (`winget install Gyan.FFmpeg`) für Downloads in voller Quali
 - Lokale Dateien (mp4, webm, mkv, mov, gif, Bilder), Web-Links (direkte Videos oder alles, was yt-dlp kann), YouTube
 - ⬇ lädt Links in die Bibliothek, danach offline nutzbar
 - Lautstärke, Anpassung (Füllen / Einpassen / Strecken), Monitor-Auswahl, Max-Qualität
+- ★ Favoriten (Stern auf der Karte) und Filter „★ Favoriten“ in der Bibliothek
+- 🎲 Zufällig: ein zufälliges Wallpaper aus der aktuellen Auswahl (Suche/Filter)
+- Automatischer Wechsel alle 5 / 15 / 30 Minuten, jede Stunde oder alle 3 Stunden
 - Pausiert automatisch bei Vollbild-Apps (Spiele usw.)
-- Tray-Icon (Pause, Nächstes, Stoppen, Beenden), Autostart mit Windows
+- Tray-Icon (Pause, Nächstes, Zufällig, Stoppen, Beenden), Autostart mit Windows
 - Nach einem mpv-Absturz startet das Wallpaper automatisch neu
 
 ## Pro Monitor ein eigenes Wallpaper
@@ -51,6 +54,13 @@ Optional: `ffmpeg` (`winget install Gyan.FFmpeg`) für Downloads in voller Quali
    und startet Wallura danach neu. „Nach Updates suchen“ prüft sofort.
 
 Updates gibt es nur in der installierten Version (.exe), nicht beim Start aus dem Quellcode.
+
+## Handy (Android)
+
+Im Ordner `android/` liegt die Android-App im gleichen Design: Videos importieren, per Favoriten-Stern
+sortieren, zufällig wählen, Lautstärke und Anpassung einstellen und das Ganze als Live-Wallpaper setzen.
+Der automatische Wechsel (Aus / 5 / 15 / 30 / 60 Minuten) läuft auch auf dem Homescreen, wenn die App
+nicht geöffnet ist. Bei jedem Tag `v*` baut die CI die APK und hängt sie an das Release.
 
 ## Daten
 
