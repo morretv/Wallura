@@ -1045,13 +1045,49 @@ def desk_fallback_background():
 
 
 def desk_background_path(desk):
-    """Bild/Video des eigenen Desktops (eigene Datei vor mitgeliefertem Thema)."""
+    """Bild/Video des eigenen Desktops (eigene Datei/Link vor mitgeliefertem Thema)."""
     desk = desk if isinstance(desk, dict) else {}
     bg = desk.get("bg")
-    if isinstance(bg, str) and bg and Path(bg).exists():
-        return bg
+    if isinstance(bg, str) and bg:
+        if re.match(r"https?://", bg, re.I) or Path(bg).exists():
+            return bg
     asset = ASSET_DIR / "desktop" / DESK_THEMES.get(desk.get("theme"), "anime.jpg")
     return str(asset) if asset.exists() else desk_fallback_background()
+
+
+def desk_still_path(desk):
+    """Vorschaubild für den Hintergrund: Bilder direkt, aus Videos/Links einen Frame ziehen."""
+    src = desk_background_path(desk)
+    if str(src).lower().endswith(IMAGE_EXT):
+        return src
+    cache, meta = DATA_DIR / "desk_still.jpg", DATA_DIR / "desk_still.txt"
+    try:
+        stamp = f"{src}|{Path(src).stat().st_mtime:.0f}"
+    except OSError:
+        stamp = f"{src}|0"
+    try:
+        if cache.exists() and meta.read_text(encoding="utf-8") == stamp:
+            return str(cache)
+    except OSError:
+        pass
+    mpv = find_tool("mpv")
+    if not mpv:
+        return None
+    tmp = DATA_DIR / "desk_still_tmp"
+    tmp.mkdir(exist_ok=True)
+    try:
+        run_hidden([mpv, "--no-config", "--no-audio", "--hwdec=no", "--vo=image", "--vo-image-format=jpg",
+                    f"--vo-image-outdir={tmp}", "--start=10%", "--frames=1", "--no-terminal", str(src)], 45)
+        files = sorted(tmp.glob("*.jpg"))
+        if files:
+            shutil.move(str(files[0]), cache)
+            meta.write_text(stamp, encoding="utf-8")
+            return str(cache)
+    except Exception:
+        pass
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return None
 
 
 def desk_text_lines(desk, when=None):
@@ -1070,11 +1106,12 @@ def desk_text_lines(desk, when=None):
     return out
 
 
-def render_desk_image(desk, size=(1920, 1080), when=None):
+def render_desk_image(desk, size=(1920, 1080), when=None, still=None):
     """Zeichnet Hintergrund + Overlay als Bild (Vorschau und Export)."""
     W, H = size
+    source = still if still is not None else (desk_still_path(desk) or "")
     try:
-        img = Image.open(desk_background_path(desk)).convert("RGB")
+        img = Image.open(source).convert("RGB")
     except Exception:
         img = Image.new("RGB", (W, H), (10, 12, 18))
     img = ImageOps.fit(img, (W, H)).convert("RGBA")
@@ -1357,20 +1394,21 @@ class Player:
 
         new = {}
         for idx, item in todo.items():
-            src = item["src"]
+            src, kind = item["src"], item["kind"]
             if item.get("id") == DESK_ID:  # Motiv immer frisch aus den Desktop-Einstellungen
                 src = desk_background_path(self.cfg.get("desk") or {})
-            if item["kind"] == "local" and not Path(src).exists():
+                kind = detect_kind(src)
+            if kind == "local" and not Path(src).exists():
                 self.on_error(f"Datei nicht gefunden: {src}")
                 ok = False
                 continue
-            if item["kind"] == "youtube" and not ytdlp:
+            if kind == "youtube" and not ytdlp:
                 self.on_error("yt-dlp fehlt (für YouTube nötig) – bitte unter Einstellungen auf „Tools installieren“ klicken.")
                 ok = False
                 continue
             pipe = rf"\\.\pipe\wallura_{os.getpid()}_{idx}"
             log = DATA_DIR / f"mpv_{idx}.log"
-            extra = ["--cache=no"] if item["kind"] == "local" else []  # lokale Dateien brauchen keinen Puffer
+            extra = ["--cache=no"] if kind == "local" else []  # lokale Dateien brauchen keinen Puffer
             if item.get("id") == DESK_ID:  # Premium-Desktop: Uhr/Datum/Text als Live-Overlay
                 extra += self._desk_args(mons[idx]["rect"])
             cmd = base + extra + [f"--title=Wallura-{os.getpid()}-{idx}", f"--input-ipc-server={pipe}",
@@ -1916,6 +1954,96 @@ class FormDialog(ctk.CTkToplevel):
         self.cancel()
 
     def cancel(self):
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+
+
+class LibraryPickerDialog(ctk.CTkToplevel):
+    """Wallpaper aus der eigenen Bibliothek als Desktop-Hintergrund wählen."""
+
+    def __init__(self, parent, items):
+        super().__init__(parent)
+        self.result = None
+        self._thumbs = []
+        self.title("Wallpaper aus der Bibliothek")
+        self.configure(fg_color=BG)
+        self.resizable(False, True)
+        try:
+            self.transient(parent)
+        except Exception:
+            pass
+
+        ctk.CTkLabel(self, text="Hintergrund aus der Bibliothek", font=ui_font(19, "bold"),
+                     text_color=TEXT, anchor="w").pack(fill="x", padx=22, pady=(18, 2))
+        ctk.CTkLabel(self, text="Alles, was du schon hinzugefügt hast – direkt als Desktop-Hintergrund.",
+                     font=ui_font(11), text_color=MUTED, anchor="w", justify="left",
+                     wraplength=520).pack(fill="x", padx=22)
+
+        box = ctk.CTkScrollableFrame(self, fg_color="transparent", scrollbar_button_color=BORDER,
+                                     scrollbar_button_hover_color=MUTED)
+        box.pack(fill="both", expand=True, padx=16, pady=(10, 4))
+        for it in items:
+            row = ctk.CTkFrame(box, fg_color=SURFACE2, corner_radius=12, border_width=1, border_color=BORDER)
+            row.pack(fill="x", pady=3)
+            thumb = None
+            try:
+                p = THUMB_DIR / f"{it['id']}.jpg"
+                if p.exists():
+                    thumb = ctk.CTkImage(ImageOps.fit(Image.open(p).convert("RGB"), (256, 144)), size=(128, 72))
+                    self._thumbs.append(thumb)
+            except Exception:
+                thumb = None
+            if thumb is not None:
+                ctk.CTkLabel(row, image=thumb, text="").pack(side="left", padx=(10, 12), pady=8)
+            info = ctk.CTkFrame(row, fg_color="transparent")
+            info.pack(side="left", fill="x", expand=True, pady=8)
+            ctk.CTkLabel(info, text=shorten(str(it.get("title") or "?" ), 52), font=ui_font(13, "bold"),
+                         text_color=TEXT, anchor="w").pack(fill="x")
+            ctk.CTkLabel(info, text=f"{KIND_LABEL.get(it.get('kind'), '?')}  ·  "
+                                   f"{shorten(str(it.get('src') or ''), 58)}", font=ui_font(10),
+                         text_color=MUTED, anchor="w").pack(fill="x")
+            ctk.CTkButton(row, text="Wählen", width=96, height=32, corner_radius=BTN_RADIUS,
+                          fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=ON_ACCENT,
+                          font=ui_font(12, "bold"), command=lambda i=it: self._pick(i)).pack(
+                side="right", padx=10, pady=8)
+
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=22, pady=(2, 16))
+        ctk.CTkButton(bar, text="Abbrechen", height=38, width=130, corner_radius=BTN_RADIUS,
+                      fg_color="transparent", hover_color=SURFACE2, text_color=MUTED, border_width=1,
+                      border_color=BORDER, font=ui_font(13), command=self.cancel).pack(side="right")
+
+        self.bind("<Escape>", lambda e: self.cancel())
+        self.update_idletasks()
+        w = 600
+        h = max(420, min(660, self.winfo_reqheight()))
+        try:
+            px, py = parent.winfo_rootx(), parent.winfo_rooty()
+            pw, ph = parent.winfo_width(), parent.winfo_height()
+        except Exception:
+            px, py, pw, ph = 0, 0, self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{w}x{h}+{px + max(0, (pw - w) // 2)}+{py + max(0, (ph - h) // 3)}")
+        self.after(120, self._activate)
+
+    def _activate(self):
+        try:
+            self.grab_set()
+            self.lift()
+            self.focus_force()
+        except Exception:
+            pass
+
+    def _pick(self, item):
+        self.result = item
+        self._close()
+
+    def cancel(self):
+        self._close()
+
+    def _close(self):
         try:
             self.grab_release()
         except Exception:
@@ -3301,7 +3429,7 @@ class App(ctk.CTk):
 
     def _desk_changed(self):
         save_config(self.cfg)
-        self._update_desk_preview()
+        self._desk_preview_async()
         if DESK_ID in self.cfg.get("assign", {}).values():
             threading.Thread(target=lambda: self.player.apply(self._assign_items(), force=True),
                              daemon=True).start()
@@ -3362,16 +3490,56 @@ class App(ctk.CTk):
         self._desk_changed()
         self.after(10, self._build_desk_page)
 
-    def _update_desk_preview(self):
+    def _desk_pick_library(self):
+        if not self._require_premium():
+            return
+        items = [i for i in self.cfg["items"] if i.get("id") != DESK_ID]
+        if not items:
+            self.set_status("Deine Bibliothek ist noch leer – füge zuerst ein Wallpaper hinzu.", True)
+            return
+        dlg = LibraryPickerDialog(self, items)
+        dlg.wait_window()
+        if dlg.result is None:
+            return
+        item = dlg.result
+        self._desk_cfg()["bg"] = item["src"]
+        self._desk_changed()
+        if DESK_ID not in self.cfg.get("assign", {}).values():
+            self.set_status(f"„{shorten(str(item.get('title') or item['src']), 40)}“ als Hintergrund gewählt – "
+                            "„Desktop anwenden“ startet ihn.")
+        self.after(10, self._build_desk_page)
+
+    def _update_desk_preview(self, still=None):
         lbl = getattr(self, "_desk_preview", None)
         if lbl is None:
             return
         try:
-            img = render_desk_image(self._desk_cfg(), (640, 360))
+            img = render_desk_image(self._desk_cfg(), (640, 360), still=still or "")
             self._desk_preview_img = ctk.CTkImage(img, size=(640, 360))
             lbl.configure(image=self._desk_preview_img, text="")
         except Exception:
             lbl.configure(text="Vorschau gerade nicht verfügbar", image=None)
+
+    def _desk_preview_async(self):
+        """Vorschau im Hintergrund vorbereiten – Videos brauchen erst ein Standbild."""
+        lbl = getattr(self, "_desk_preview", None)
+        if lbl is None:
+            return
+        desk = dict(self._desk_cfg())
+        src = desk_background_path(desk)
+        if str(src).lower().endswith(IMAGE_EXT) and not re.match(r"https?://", str(src), re.I):
+            self._update_desk_preview(src)
+            return
+        try:
+            lbl.configure(image=None, text="Vorschau wird geladen …")
+        except Exception:
+            pass
+
+        def work():
+            still = desk_still_path(desk)
+            self.ui(lambda: self._update_desk_preview(still))
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _build_desk_page(self):
         host = getattr(self, "_desk_host", None)
@@ -3408,7 +3576,7 @@ class App(ctk.CTk):
                 self._btn(row, "Anmelden", self.login, "primary", width=150, height=38).pack(side="left")
             self._desk_preview = ctk.CTkLabel(box, text="")
             self._desk_preview.pack(padx=20, pady=(0, 18))
-            self._update_desk_preview()
+            self._desk_preview_async()
             return
 
         desk = self._desk_cfg()
@@ -3419,11 +3587,16 @@ class App(ctk.CTk):
                                                  **self._menu_style())
         self.desk_theme_menu.set("Eigene Datei" if desk.get("bg") else desk.get("theme", "Anime-Dämmerung"))
         self.desk_theme_menu.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        chosen = desk.get("bg") or ""
+        shown = next((i["title"] for i in self.cfg["items"]
+                      if i.get("src") == chosen and i.get("id") != DESK_ID), chosen)
         row = self._row(bg, "Eigene Datei",
-                        shorten(desk.get("bg") or "Noch keine eigene Datei gewählt.", 70))
+                        shorten(shown or "Noch keine eigene Datei gewählt.", 70))
         acts = ctk.CTkFrame(row, fg_color="transparent")
         acts.grid(row=0, column=1, sticky="e", padx=(16, 0))
-        self._btn(acts, "Datei wählen", self._desk_pick_background, "secondary", width=130, height=30,
+        self._btn(acts, "Aus Bibliothek", self._desk_pick_library, "secondary", width=124, height=30,
+                  font=self._font(11)).pack(side="left", padx=2)
+        self._btn(acts, "Datei wählen", self._desk_pick_background, "secondary", width=114, height=30,
                   font=self._font(11)).pack(side="left", padx=2)
         if desk.get("bg"):
             self._btn(acts, "Entfernen", self._desk_clear_background, "ghost", width=100, height=30,
@@ -3475,7 +3648,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(host, text="Tipp: „Als Wallpaper speichern“ legt ein fertiges Bild mit Uhr und Text "
                                 "in deiner Bibliothek ab.", font=self._font(11), text_color=MUTED,
                      anchor="w").pack(fill="x", pady=(0, 12))
-        self._update_desk_preview()
+        self._desk_preview_async()
 
     def apply_desk(self):
         if not self._require_premium():
@@ -3486,7 +3659,7 @@ class App(ctk.CTk):
             item = {"id": DESK_ID, "title": "Mein Desktop", "kind": "local", "src": src,
                     "added": time.time(), "plays": 0}
             self.cfg["items"].append(item)
-        item.update({"src": src, "kind": "local", "title": "Mein Desktop"})
+        item.update({"src": src, "kind": detect_kind(src), "title": "Mein Desktop"})
         save_config(self.cfg)
         threading.Thread(target=lambda: (make_local_thumb(DESK_ID, src), self.ui(self.refresh_library)),
                          daemon=True).start()
@@ -3504,26 +3677,32 @@ class App(ctk.CTk):
     def export_desk(self):
         if not self._require_premium():
             return
-        try:
-            img = render_desk_image(self._desk_cfg(), (1920, 1080))
-        except Exception as e:
-            self.set_status(f"Wallpaper ließ sich nicht erstellen: {e}", True)
-            return
+        desk = dict(self._desk_cfg())
         title = "Mein Desktop " + time.strftime("%d.%m. %H-%M")
         path = LIB_DIR / f"{title}.png"
-        try:
-            img.save(path)
-        except Exception as e:
-            self.set_status(f"Datei ließ sich nicht speichern: {e}", True)
-            return
-        item = {"id": uuid.uuid4().hex[:10], "title": title, "kind": "local", "src": str(path),
-                "added": time.time(), "plays": 0}
-        self.cfg["items"].append(item)
-        save_config(self.cfg)
-        threading.Thread(target=lambda: (make_local_thumb(item["id"], item["src"]),
-                                         self.ui(self.refresh_library)), daemon=True).start()
-        self.set_status(f"Wallpaper „{title}“ gespeichert – es liegt jetzt in der Bibliothek.")
-        self.toast("Wallpaper gespeichert")
+        self.set_status("Erstelle Wallpaper …")
+
+        def work():
+            try:
+                render_desk_image(desk, (1920, 1080)).save(path)
+            except Exception as e:
+                msg = f"Wallpaper ließ sich nicht erstellen: {e}"
+                self.ui(lambda: self.set_status(msg, True))
+                return
+
+            def done():
+                item = {"id": uuid.uuid4().hex[:10], "title": title, "kind": "local", "src": str(path),
+                        "added": time.time(), "plays": 0}
+                self.cfg["items"].append(item)
+                save_config(self.cfg)
+                threading.Thread(target=lambda: (make_local_thumb(item["id"], item["src"]),
+                                                 self.ui(self.refresh_library)), daemon=True).start()
+                self.set_status(f"Wallpaper „{title}“ gespeichert – es liegt jetzt in der Bibliothek.")
+                self.toast("Wallpaper gespeichert")
+
+            self.ui(done)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def next_wallpaper(self):
         items = self._playlist()
