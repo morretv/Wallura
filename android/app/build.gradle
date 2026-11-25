@@ -10,8 +10,8 @@ android {
         applicationId 'de.wallura.app'
         minSdk 24
         targetSdk 34
-        versionCode 10601
-        versionName '1.6.1'
+        versionCode 10602
+        versionName '1.6.2'
     }
 
     // Fester Signaturschlüssel im Projekt: jede APK hat dieselbe Signatur.
@@ -19,7 +19,7 @@ android {
     // Android verweigerte dann Installation/Update mit „App nicht installiert“.
     signingConfigs {
         release {
-            storeFile file('wallura-release.jks')
+            storeFile rootProject.file('wallura-release.jks')
             storePassword 'WalluraRelease2026'
             keyAlias 'wallura'
             keyPassword 'WalluraRelease2026'
