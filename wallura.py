@@ -1215,8 +1215,10 @@ local function draw()
             y = CFG.h - m
             for k = #lines, i + 1, -1 do y = y - hs[k] end
         end
+        -- ass-events erwartet nur den ASS-Text (eine Zeile = ein Event),
+        -- KEIN "Dialogue: ..."-Präfix - das würde als Text angezeigt.
         events[#events + 1] = string.format(
-            "Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an%d\\pos(%d,%d)\\fs%d\\c&H%s&\\3c&H000000&\\bord3\\shad0\\b%d\\fnSegoe UI}%s",
+            "{\\an%d\\pos(%d,%d)\\fs%d\\c&H%s&\\3c&H000000&\\bord3\\shad0\\b%d\\fnSegoe UI}%s",
             an, x, y, lines[i][2], CFG.color, lines[i][3] and 1 or 0, lines[i][1])
     end
     mp.command_native({name = "osd-overlay", id = OVL, format = "ass-events",
