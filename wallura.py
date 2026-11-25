@@ -1458,6 +1458,124 @@ class LoginDialog(ctk.CTkToplevel):
         self.geometry(f"{w}x{h}+{px + max(0, (pw - w) // 2)}+{py + max(0, (ph - h) // 3)}")
 
 
+class PasswordDialog(ctk.CTkToplevel):
+    """Modaler Passwort-Dialog: prüft im Fenster und bleibt bei Fehlern offen.
+    .result ist None (abgebrochen) oder {key: wert}."""
+
+    def __init__(self, parent, title, subtitle, fields, ok_text, validate):
+        super().__init__(parent)
+        self.result = None
+        self._vars, self._entries = {}, []
+        self._validate = validate
+        self._done = False
+        self.title(title)
+        self.configure(fg_color=BG)
+        self.resizable(False, False)
+        try:
+            self.transient(parent)
+        except Exception:
+            pass
+
+        box = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=CARD_RADIUS)
+        box.pack(fill="both", expand=True, padx=16, pady=16)
+        ctk.CTkLabel(box, text=title, font=ui_font(19, "bold"), text_color=TEXT,
+                     anchor="w").pack(fill="x", padx=24, pady=(22, 2))
+        ctk.CTkLabel(box, text=subtitle, font=ui_font(11), text_color=MUTED, anchor="w", justify="left",
+                     wraplength=350).pack(fill="x", padx=24, pady=(0, 4))
+
+        self._first = None
+        for field in fields:
+            ctk.CTkLabel(box, text=field["label"], font=ui_font(12), text_color=TEXT,
+                         anchor="w").pack(fill="x", padx=24, pady=(12, 4))
+            var = ctk.StringVar()
+            entry = ctk.CTkEntry(box, textvariable=var, show="•", height=38, corner_radius=BTN_RADIUS,
+                                 fg_color=SURFACE2, border_color=BORDER, border_width=1,
+                                 text_color=TEXT, font=ui_font(13))
+            entry.pack(fill="x", padx=24)
+            self._entries.append(entry)
+            if self._first is None:
+                self._first = entry
+            self._vars[field["key"]] = var
+
+        self._show_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(box, text="Passwort anzeigen", variable=self._show_var, command=self._toggle_show,
+                        font=ui_font(11), text_color=MUTED, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                        border_color=BORDER, checkbox_width=17, checkbox_height=17).pack(
+            fill="x", padx=24, pady=(10, 0))
+
+        self._err = ctk.CTkLabel(box, text="", font=ui_font(11), text_color=STATUS_ERR, anchor="w",
+                                 justify="left", wraplength=350)
+        self._err.pack(fill="x", padx=24, pady=(8, 0))
+
+        btns = ctk.CTkFrame(box, fg_color="transparent")
+        btns.pack(fill="x", padx=24, pady=(18, 22))
+        self._ok_btn = ctk.CTkButton(btns, text=ok_text, height=40, corner_radius=BTN_RADIUS,
+                                     fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=ON_ACCENT,
+                                     font=ui_font(13, "bold"), command=self._ok)
+        self._ok_btn.pack(side="right", width=160)
+        ctk.CTkButton(btns, text="Abbrechen", height=40, corner_radius=BTN_RADIUS, fg_color="transparent",
+                      hover_color=SURFACE2, text_color=MUTED, border_width=1, border_color=BORDER,
+                      font=ui_font(13), command=self.cancel).pack(side="right", padx=(0, 10), width=120)
+
+        self.bind("<Return>", lambda e: self._ok())
+        self.bind("<Escape>", lambda e: self.cancel())
+        self._center(parent)
+        self.after(150, self._activate)
+
+    def _toggle_show(self):
+        show = "" if self._show_var.get() else "•"
+        for entry in self._entries:
+            try:
+                entry.configure(show=show)
+            except Exception:
+                pass
+
+    def _activate(self):
+        try:
+            self.grab_set()
+        except Exception:
+            pass
+        try:
+            self.lift()
+            self.focus_force()
+        except Exception:
+            pass
+        if self._first is not None:
+            self._first.focus_set()
+
+    def _center(self, parent):
+        self.update_idletasks()
+        w, h = max(440, self.winfo_reqwidth()), self.winfo_reqheight()
+        try:
+            px, py, pw, ph = (parent.winfo_rootx(), parent.winfo_rooty(),
+                              parent.winfo_width(), parent.winfo_height())
+        except Exception:
+            px, py, pw, ph = 0, 0, self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{w}x{h}+{px + max(0, (pw - w) // 2)}+{py + max(0, (ph - h) // 3)}")
+
+    def _ok(self):
+        if self._done:
+            return
+        values = {k: v.get() for k, v in self._vars.items()}
+        err = self._validate(values) if self._validate else None
+        if err:
+            self._err.configure(text=err)
+            if self._first is not None:
+                self._first.focus_set()
+            return
+        self._done = True
+        self.result = values
+        self.cancel()
+
+    def cancel(self):
+        self._done = True
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        self.destroy()
+
+
 class FormDialog(ctk.CTkToplevel):
     """Modaler Dialog mit Eingabefeldern. .result ist None (abgebrochen) oder {key: wert}."""
 
@@ -1708,15 +1826,18 @@ class App(ctk.CTk):
 
     # -- Bausteine für die Einstellungen
     def _section(self, parent, title, desc=None):
-        box = ctk.CTkFrame(parent, corner_radius=CARD_RADIUS, fg_color=SURFACE, border_width=1, border_color=BORDER)
-        box.pack(fill="x", pady=(0, 14))
+        box = ctk.CTkFrame(parent, corner_radius=CARD_RADIUS, fg_color=SURFACE)
+        box.pack(fill="x", pady=(0, 16))
         head = ctk.CTkFrame(box, fg_color="transparent")
-        head.pack(fill="x", padx=20, pady=(18, 4))
-        ctk.CTkLabel(head, text=title, font=self._font(15, "bold"), text_color=TEXT,
-                     anchor="w").pack(anchor="w")
+        head.pack(fill="x", padx=20, pady=(20, 4))
+        line = ctk.CTkFrame(head, fg_color="transparent")
+        line.pack(fill="x")
+        ctk.CTkFrame(line, width=3, height=16, corner_radius=2, fg_color=ACCENT).pack(side="left", padx=(0, 10))
+        ctk.CTkLabel(line, text=title, font=self._font(15, "bold"), text_color=TEXT,
+                     anchor="w").pack(side="left")
         if desc:
             ctk.CTkLabel(head, text=desc, font=self._font(11), text_color=MUTED, anchor="w",
-                         justify="left", wraplength=560).pack(anchor="w", pady=(2, 0))
+                         justify="left", wraplength=560).pack(anchor="w", padx=(13, 0), pady=(3, 0))
         return box
 
     def _row(self, parent, title, desc=None):
@@ -1798,8 +1919,7 @@ class App(ctk.CTk):
         self._nav_btn(side, "Einstellungen", "settings")
 
         # Angemeldetes Konto
-        usercard = ctk.CTkFrame(side, corner_radius=CARD_RADIUS, fg_color=SURFACE2, border_width=1,
-                                border_color=BORDER)
+        usercard = ctk.CTkFrame(side, corner_radius=CARD_RADIUS, fg_color=SURFACE2)
         usercard.pack(side="top", fill="x", padx=14, pady=(14, 4))
         urow = ctk.CTkFrame(usercard, fg_color="transparent")
         urow.pack(fill="x", padx=12, pady=(12, 0))
@@ -1822,13 +1942,15 @@ class App(ctk.CTk):
                   "primary" if self.guest else "ghost", height=30,
                   font=self._font(12)).pack(fill="x", padx=10, pady=(8, 10))
 
-        ctk.CTkLabel(side, text=COPYRIGHT, font=self._font(10), text_color=MUTED, anchor="center",
+        ctk.CTkLabel(side, text=COPYRIGHT, font=self._font(9), text_color="#5f6878", anchor="center",
                      wraplength=SIDEBAR_W - 24).pack(side="bottom", fill="x", padx=12, pady=(0, 12))
+        ctk.CTkLabel(side, text=f"Version {APP_VERSION}", font=self._font(10), text_color=MUTED,
+                     anchor="center").pack(side="bottom", fill="x", padx=12, pady=(0, 2))
 
-        mon = ctk.CTkFrame(side, corner_radius=16, fg_color=SURFACE2, border_width=1, border_color=BORDER)
+        mon = ctk.CTkFrame(side, corner_radius=CARD_RADIUS, fg_color=SURFACE2)
         mon.pack(side="bottom", fill="x", padx=14, pady=(0, 12))
-        ctk.CTkLabel(mon, text="MONITOR", font=self._font(11, "bold"), text_color=MUTED,
-                     anchor="w").pack(fill="x", padx=14, pady=(12, 6))
+        ctk.CTkLabel(mon, text="MONITORE", font=self._font(9, "bold"), text_color=MUTED,
+                     anchor="w").pack(fill="x", padx=14, pady=(14, 6))
         self.mon_preview = ctk.CTkLabel(mon, text="", cursor="hand2")
         self.mon_preview.pack(padx=10, pady=(0, 6))
         self.mon_preview.bind("<Button-1>", self._on_preview_click)
@@ -1888,9 +2010,10 @@ class App(ctk.CTk):
         self._search_job = None
         self.search_var = ctk.StringVar()
         self.search_var.trace_add("write", self._on_search)
-        ctk.CTkEntry(mhead, textvariable=self.search_var, placeholder_text="Suchen", width=190,
-                     height=34, corner_radius=10, fg_color=SURFACE, border_color=BORDER, text_color=TEXT,
-                     placeholder_text_color=MUTED, font=self._font(13)).pack(side="right", padx=(0, 8))
+        ctk.CTkEntry(mhead, textvariable=self.search_var, placeholder_text="Suchen …", width=200,
+                     height=34, corner_radius=BTN_RADIUS, fg_color=SURFACE, border_width=0,
+                     text_color=TEXT, placeholder_text_color=MUTED,
+                     font=self._font(13)).pack(side="right", padx=(0, 8))
 
         frow = ctk.CTkFrame(lib, fg_color="transparent")
         frow.grid(row=1, column=0, sticky="we", pady=(0, 6))
@@ -1921,8 +2044,10 @@ class App(ctk.CTk):
         sett.grid(row=0, column=0, sticky="nsew")
         inner = ctk.CTkFrame(sett, fg_color="transparent")
         inner.pack(fill="x", padx=(0, 10))
-        ctk.CTkLabel(inner, text="Einstellungen", font=self._font(26, "bold"), text_color=TEXT,
-                     anchor="w").pack(fill="x", pady=(0, 14))
+        ctk.CTkLabel(inner, text="Einstellungen", font=self._font(28, "bold"), text_color=TEXT,
+                     anchor="w").pack(fill="x")
+        ctk.CTkLabel(inner, text="Alles, was Wallura auf diesem PC tut – ohne Umwege.",
+                     font=self._font(12), text_color=MUTED, anchor="w").pack(fill="x", pady=(2, 16))
 
         acc_box = self._section(inner, "Konto", "Anmeldung, Rolle und Passwort auf diesem PC.")
         if self.guest:
@@ -2108,7 +2233,7 @@ class App(ctk.CTk):
         self._pages = {"library": lib, "settings": sett}
 
         # ---------- Player-Leiste unten: Status, Steuerung, Lautstärke
-        bar = ctk.CTkFrame(main, fg_color=SURFACE, corner_radius=CARD_RADIUS, border_width=1, border_color=BORDER)
+        bar = ctk.CTkFrame(main, fg_color=SURFACE, corner_radius=CARD_RADIUS)
         bar.grid(row=2, column=0, sticky="we", pady=(12, 0))
         bar.grid_columnconfigure(0, weight=1)
         left = ctk.CTkFrame(bar, fg_color="transparent")
@@ -2120,9 +2245,8 @@ class App(ctk.CTk):
         self.now_lbl.pack(fill="x", pady=(1, 1))
         self.status = ctk.CTkLabel(left, text="Bereit.", anchor="w", font=self._font(11), text_color=MUTED)
         self.status.pack(fill="x")
-        self.progress = ctk.CTkProgressBar(left, height=4, progress_color=ACCENT, fg_color=BORDER)
-        self.progress.set(0)
-        self.progress.pack(fill="x", pady=(6, 0))
+        self.progress = ctk.CTkProgressBar(left, height=3, progress_color=ACCENT, fg_color=BORDER)
+        self.progress.set(0)  # wird nur während eines Downloads eingeblendet
 
         ctrl = ctk.CTkFrame(bar, fg_color="transparent")
         ctrl.grid(row=0, column=1, padx=4)
@@ -2287,8 +2411,8 @@ class App(ctk.CTk):
         on = sorted(self._on_map.get(item["id"], []))
         active = bool(on) and self.player.active
         card = ctk.CTkFrame(self.scroll, corner_radius=CARD_RADIUS,
-                            fg_color="#0e2530" if active else SURFACE,
-                            border_width=2 if active else 1, border_color=ACCENT if active else BORDER)
+                            fg_color="#0c1f28" if active else SURFACE,
+                            border_width=1, border_color=ACCENT_DIM if active else BORDER)
         card.grid(row=r, column=c, padx=9, pady=9, sticky="n")
         where = None
         if active:
@@ -2884,6 +3008,7 @@ class App(ctk.CTk):
         self._downloads.add(item["id"])
         self.set_status(f"Lade „{shorten(item['title'], 40)}“ herunter …")
         self.progress.set(0)
+        self.progress.pack(fill="x", pady=(7, 0))
         threading.Thread(target=self._download_worker, args=(item,), daemon=True).start()
 
     def _download_worker(self, item):
@@ -2893,14 +3018,15 @@ class App(ctk.CTk):
                                      lambda p: self.ui(lambda: self.progress.set(p / 100)))
             except Exception as e:
                 msg = f"Download fehlgeschlagen: {e}"
-                self.ui(lambda: (self.set_status(msg, True), self.progress.set(0)))
+                self.ui(lambda: (self.set_status(msg, True), self.progress.set(0),
+                                 self.progress.pack_forget()))
                 return
             item["origin"] = item["src"]
             item["kind"], item["src"] = "local", str(path)
             save_config(self.cfg)
             if not (THUMB_DIR / f"{item['id']}.jpg").exists():
                 make_local_thumb(item["id"], path)
-            self.ui(lambda: (self.progress.set(1),
+            self.ui(lambda: (self.progress.pack_forget(),
                              self.set_status(f"Heruntergeladen: {path.name} (offline nutzbar)"),
                              self.toast("⬇  Download fertig – jetzt offline nutzbar"),
                              self.refresh_library()))
@@ -3298,23 +3424,34 @@ class App(ctk.CTk):
             self._show_update_bar(self.update_info, self.update_file)
 
     def change_password(self):
-        res = self._form("Passwort ändern", [
-            {"key": "old", "label": "Aktuelles Passwort", "type": "pw"},
-            {"key": "new", "label": "Neues Passwort", "type": "pw"},
-            {"key": "new2", "label": "Neues Passwort wiederholen", "type": "pw"},
-        ], None, "Speichern")
+        name = self.user.get("name", GAST)
+
+        def check(values):
+            user = find_account(load_accounts(), name)
+            if not user or not _password_ok(values.get("old", ""), user.get("pw")):
+                return "Das aktuelle Passwort ist falsch."
+            if len(values.get("new", "")) < MIN_PW_LEN:
+                return f"Das neue Passwort braucht mindestens {MIN_PW_LEN} Zeichen."
+            if values.get("new") != values.get("new2"):
+                return "Die neuen Passwörter sind nicht gleich."
+            return None
+
+        dlg = PasswordDialog(self, "Passwort ändern",
+                             "Bestätige zuerst dein aktuelles Passwort und lege dann ein neues fest.",
+                             [{"key": "old", "label": "Aktuelles Passwort"},
+                              {"key": "new", "label": "Neues Passwort"},
+                              {"key": "new2", "label": "Neues Passwort wiederholen"}],
+                             "Passwort speichern", check)
+        dlg.wait_window()
+        res = dlg.result
         if res is None:
             return
         self.acc = load_accounts()
-        user = find_account(self.acc, self.user.get("name", ""))
-        if not user or not _password_ok(res["old"], user.get("pw")):
-            self.set_status("Das aktuelle Passwort ist falsch.", True)
-            return
-        if res["new"] != res["new2"]:
-            self.set_status("Die neuen Passwörter sind nicht gleich.", True)
-            return
-        ok, err = set_password(self.acc, self.user.get("name"), res["new"])
+        ok, err = set_password(self.acc, name, res["new"])
         self.set_status("Passwort geändert." if ok else err, not ok)
+        if ok:
+            save_session(name, True)
+            self.toast("Passwort geändert")
 
     def add_user(self):
         if not self._require_admin():
@@ -3342,14 +3479,21 @@ class App(ctk.CTk):
         user = self.acc["users"].get(key)
         if not user:
             return
-        res = self._form("Passwort zurücksetzen", [
-            {"key": "pw", "label": "Neues Passwort", "type": "pw"},
-            {"key": "pw2", "label": "Neues Passwort wiederholen", "type": "pw"},
-        ], f"Neues Passwort für „{user.get('name', key)}“.", "Speichern")
+        def check(values):
+            if len(values.get("pw", "")) < MIN_PW_LEN:
+                return f"Das Passwort braucht mindestens {MIN_PW_LEN} Zeichen."
+            if values.get("pw") != values.get("pw2"):
+                return "Die Passwörter sind nicht gleich."
+            return None
+
+        dlg = PasswordDialog(self, "Passwort zurücksetzen",
+                             f"Neues Passwort für „{user.get('name', key)}“.",
+                             [{"key": "pw", "label": "Neues Passwort"},
+                              {"key": "pw2", "label": "Neues Passwort wiederholen"}],
+                             "Speichern", check)
+        dlg.wait_window()
+        res = dlg.result
         if res is None:
-            return
-        if res["pw"] != res["pw2"]:
-            self.set_status("Die Passwörter sind nicht gleich.", True)
             return
         ok, err = set_password(self.acc, key, res["pw"])
         self.set_status("Passwort geändert." if ok else err, not ok)
@@ -3450,15 +3594,21 @@ class App(ctk.CTk):
         if not self._require_admin():
             return
         name = self.user.get("name", GAST)
-        res = self._form("Konten-Übersicht freischalten", [
-            {"key": "pw", "label": f"Passwort von „{name}“", "type": "pw"},
-        ], "Nur der Administrator sieht die Konten aller PCs. Das Passwort wird nur auf diesem PC "
-           "geprüft und nicht gespeichert.", "Freischalten")
+
+        def check(values):
+            user = find_account(load_accounts(), name)
+            if not user or not _password_ok(values.get("pw", ""), user.get("pw")):
+                return "Das Passwort ist falsch. Bitte noch einmal eingeben."
+            return None
+
+        dlg = PasswordDialog(self, "Konten-Übersicht freischalten",
+                             "Nur der Administrator sieht die Konten aller PCs. Das Passwort wird nur "
+                             "auf diesem PC geprüft und nicht gespeichert.",
+                             [{"key": "pw", "label": f"Passwort von „{name}“"}],
+                             "Freischalten", check)
+        dlg.wait_window()
+        res = dlg.result
         if res is None:
-            return
-        user = find_account(load_accounts(), name)
-        if not user or not _password_ok(res["pw"], user.get("pw")):
-            self.set_status("Das Passwort ist falsch.", True)
             return
         token = secrets.token_urlsafe(32)
         ok, err = claim_cloud(token)
@@ -3469,6 +3619,7 @@ class App(ctk.CTk):
         self.cfg["cloud_token"] = token
         save_config(self.cfg)
         self.set_status("Konten-Übersicht freigeschaltet.")
+        self.toast("Konten-Übersicht freigeschaltet")
         self.refresh_cloud()
 
     def _render_cloud(self, accounts):
