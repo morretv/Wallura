@@ -17,11 +17,13 @@ import os
 import queue
 import random
 import re
+import secrets
 import shutil
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -47,6 +49,8 @@ APP_VERSION = "1.8.0"   # wird vom Build / GitHub-Workflow aus dem Release-Tag g
 # GitHub-Repo für automatische Updates ("benutzername/repo"). Dort muss pro Version ein Release
 # mit der Datei Wallura-Setup.exe liegen (Repo bzw. Releases müssen öffentlich sein).
 GITHUB_REPO = "MorreTv/Wallura"
+# Server für die zentrale Kontenliste (Code im Ordner "cloud/"). Leer = Konten bleiben nur lokal.
+CLOUD_URL = "https://wallura-konten-1jomkz-preview.freebuff.site"
 APP_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("APPDATA", str(APP_DIR))) / APP_NAME
 # Umzug von der alten Version: %APPDATA%\\LiveWall -> %APPDATA%\\Wallura (Einstellungen, Downloads, Tools)
@@ -138,6 +142,7 @@ DEFAULTS = {
     "autostart": False,
     "auto_update": True,
     "update_repo": "",    # optional: überschreibt GITHUB_REPO
+    "cloud_token": "",    # Zugang zur Konten-Übersicht (wird beim Freischalten gesetzt)
 }
 
 
@@ -433,6 +438,58 @@ def load_session():
         clear_session()  # Konto gelöscht oder Passwort geändert -> wieder Anmeldung nötig
         return None
     return {"name": user.get("name", key), "role": user.get("role", "user")}
+
+
+# ----------------------------------------------------------------------------- Konten-Übersicht
+# Jeder PC meldet seine Konten an den Server; die Liste sieht nur der Administrator,
+# der sie einmal mit seinem Passwort freischaltet.
+def _device_name():
+    return (os.environ.get("COMPUTERNAME") or os.environ.get("HOSTNAME") or "PC")[:64]
+
+
+def _cloud_json(path, payload=None, token="", timeout=10):
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = dict(UA)
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(CLOUD_URL.rstrip("/") + path, data=data, headers=headers,
+                                 method="POST" if data is not None else "GET")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8") or "{}")
+
+
+def report_account(name):
+    """Meldet ein Konto dieses PCs an die zentrale Liste (Fehler bleiben still)."""
+    if not CLOUD_URL:
+        return
+    try:
+        _cloud_json("/api/register", {"name": name, "device": _device_name(),
+                                      "platform": "Windows", "version": APP_VERSION})
+    except Exception:
+        pass
+
+
+def report_account_async(name):
+    threading.Thread(target=report_account, args=(name,), daemon=True).start()
+
+
+def fetch_cloud_accounts(token):
+    return _cloud_json("/api/accounts", token=token).get("accounts") or []
+
+
+def claim_cloud(token):
+    """Erster Administrator übernimmt die Übersicht. -> (ok, Fehlertext)"""
+    try:
+        res = _cloud_json("/api/claim", {"token": token})
+        return bool(res.get("ok")), ""
+    except urllib.error.HTTPError as e:
+        if e.code == 409:
+            return False, "Die Übersicht wurde bereits übernommen. Bitte auf dem PC öffnen, der sie freigeschaltet hat."
+        return False, f"Server-Fehler {e.code}."
+    except Exception as e:
+        return False, f"Server nicht erreichbar ({e})."
 
 
 # ----------------------------------------------------------------------------- Tools & Helfer
@@ -1357,6 +1414,7 @@ class LoginDialog(ctk.CTkToplevel):
     def _finish(self, session):
         self._done = True
         self.result = session
+        report_account_async(session.get("name", ""))
         self._release()
         self.destroy()
 
@@ -1486,6 +1544,8 @@ class App(ctk.CTk):
         self.guest = session is None  # ohne Anmeldung starten – Anmelden geht jederzeit über den Button
         self._login_open = False
         self.acc = load_accounts()
+        if not self.guest:  # dieses Konto in der zentralen Kontenliste aktualisieren
+            report_account_async(self.user.get("name", GAST))
         self.tools_desc = None
         self._update_title()
         self.geometry("1240x820")
@@ -1948,6 +2008,23 @@ class App(ctk.CTk):
             self._user_rows.pack(fill="x", padx=18, pady=(4, 0))
             ctk.CTkFrame(self._users_box, height=6, fg_color="transparent").pack()
             self._refresh_users()
+
+            # Konten von allen PCs (fragt den Server im Hintergrund, damit der Start nicht hängt)
+            self._cloud_box = self._section(inner, "Konten auf allen PCs")
+            row = self._row(self._cloud_box, "Konten-Übersicht",
+                            "Alle Konten, die auf PCs mit Wallura angelegt wurden – nur für Administratoren.")
+            self._btn(row, "Aktualisieren", self.refresh_cloud, "secondary", width=130, height=32,
+                      font=self._font(12)).grid(row=0, column=1, sticky="e", padx=(16, 0))
+            self._cloud_unlock = self._btn(row, "Freischalten", self.unlock_cloud, "primary", width=130,
+                                           height=32, font=self._font(12))
+            self._cloud_unlock.grid(row=0, column=2, sticky="e", padx=(8, 0))
+            self._cloud_status = ctk.CTkLabel(self._cloud_box, text="", font=self._font(11), text_color=MUTED,
+                                              anchor="w", justify="left", wraplength=520)
+            self._cloud_status.pack(fill="x", padx=18)
+            self._cloud_rows = ctk.CTkFrame(self._cloud_box, fg_color="transparent")
+            self._cloud_rows.pack(fill="x", padx=18, pady=(4, 0))
+            ctk.CTkFrame(self._cloud_box, height=6, fg_color="transparent").pack()
+            self.after(150, self.refresh_cloud)
 
         lib_box = self._section(inner, "Bibliothek")
         row = self._row(lib_box, "Sortierung", "Reihenfolge der Wallpaper in der Bibliothek.")
@@ -3117,6 +3194,8 @@ class App(ctk.CTk):
         self.acc = load_accounts()
         ok, err = create_account(self.acc, res["name"], res["pw"], role)
         self.set_status(f"Konto „{res['name'].strip()}“ angelegt." if ok else err, not ok)
+        if ok:
+            report_account_async(res["name"].strip())
         self._refresh_users()
 
     def reset_user_password(self, key):
@@ -3204,6 +3283,80 @@ class App(ctk.CTk):
                       height=28, font=self._font(11)).pack(side="left", padx=2)
             self._btn(btns, "Löschen", lambda k=key: self.remove_user(k), "danger", width=84, height=28,
                       font=self._font(11)).pack(side="left", padx=2)
+
+    # -- Konten auf allen PCs
+    def refresh_cloud(self):
+        if not self.is_admin:
+            return
+        token = self.cfg.get("cloud_token") or ""
+        if not token:
+            self._cloud_unlock.grid(row=0, column=2, sticky="e", padx=(8, 0))
+            self._cloud_status.configure(text="Noch nicht freigeschaltet: einmal das Passwort dieses "
+                                              "Administratorkontos eingeben, danach bleibt die Übersicht offen.")
+            return
+        self._cloud_unlock.grid_remove()
+        self._cloud_status.configure(text="Lade Konten …")
+
+        def work():
+            try:
+                accounts = fetch_cloud_accounts(token)
+                self.ui(lambda: self._render_cloud(accounts))
+            except Exception as e:
+                self.ui(lambda: self._cloud_status.configure(text=f"Kontenliste nicht abrufbar ({e})."))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def unlock_cloud(self):
+        """Übersicht einmalig mit dem Passwort des Administratorkontos freischalten."""
+        if not self._require_admin():
+            return
+        name = self.user.get("name", GAST)
+        res = self._form("Konten-Übersicht freischalten", [
+            {"key": "pw", "label": f"Passwort von „{name}“", "type": "pw"},
+        ], "Nur der Administrator sieht die Konten aller PCs. Das Passwort wird nur auf diesem PC "
+           "geprüft und nicht gespeichert.", "Freischalten")
+        if res is None:
+            return
+        user = find_account(load_accounts(), name)
+        if not user or not _password_ok(res["pw"], user.get("pw")):
+            self.set_status("Das Passwort ist falsch.", True)
+            return
+        token = secrets.token_urlsafe(32)
+        ok, err = claim_cloud(token)
+        if not ok:
+            self.set_status(err, True)
+            self._cloud_status.configure(text=err)
+            return
+        self.cfg["cloud_token"] = token
+        save_config(self.cfg)
+        self.set_status("Konten-Übersicht freigeschaltet.")
+        self.refresh_cloud()
+
+    def _render_cloud(self, accounts):
+        for w in self._cloud_rows.winfo_children():
+            w.destroy()
+        if not accounts:
+            self._cloud_status.configure(text="Noch keine Konten gemeldet.")
+            return
+        self._cloud_unlock.grid_remove()
+        self._cloud_status.configure(text=f"{len(accounts)} Konto/Konten gemeldet "
+                                           "(zuletzt aktive zuerst).")
+        for acc in accounts:
+            row = ctk.CTkFrame(self._cloud_rows, fg_color=SURFACE2, corner_radius=12,
+                               border_width=1, border_color=BORDER)
+            row.pack(fill="x", pady=3)
+            info = ctk.CTkFrame(row, fg_color="transparent")
+            info.pack(fill="x", padx=14, pady=8)
+            ctk.CTkLabel(info, text=str(acc.get("name") or "?"), font=self._font(13, "bold"),
+                         text_color=TEXT, anchor="w").pack(anchor="w")
+            parts = [str(acc.get("platform") or ""), str(acc.get("device") or "")]
+            try:
+                parts.append("zuletzt " + time.strftime("%d.%m.%Y %H:%M",
+                                                         time.localtime(int(acc.get("last_seen") or 0))))
+            except (TypeError, ValueError, OSError):
+                pass
+            ctk.CTkLabel(info, text="  ·  ".join(p for p in parts if p), font=self._font(11),
+                         text_color=MUTED, anchor="w").pack(anchor="w")
 
     # -- Tray
     def _setup_tray(self):
