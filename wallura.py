@@ -68,6 +68,7 @@ PASSWORD_ROUNDS = 200_000
 MIN_PW_LEN = 4
 USER_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{2,32}$")
 ROLES = {"admin": "Administrator", "user": "Nutzer"}
+ADMIN_NAME = "Admin"   # Besitzerkonto: nur dieses Konto ist von Anfang an Administrator
 GAST = "Gast"
 for _d in (DATA_DIR, LIB_DIR, THUMB_DIR, TOOLS_USER, UPDATE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
@@ -250,13 +251,11 @@ def load_accounts():
         name = user.get("name")
         users[key] = {"name": name if isinstance(name, str) and name.strip() else key,
                       "pw": user["pw"],
-                      "role": "admin" if user.get("role") == "admin" else "user",
+                      "role": ("admin" if user.get("role") == "admin" or key == ADMIN_NAME.lower()
+                               else "user"),
                       "created": user.get("created") if isinstance(user.get("created"), int) else 0}
-    if users and not any(u["role"] == "admin" for u in users.values()):
-        # Ohne Administrator könnte niemand mehr Tools, Updates oder Benutzer verwalten
-        # (aus der App heraus nicht mehr reparierbar) -> das älteste Konto übernimmt die Rolle.
-        oldest = min(users.items(), key=lambda kv: (kv[1]["created"], kv[0]))[0]
-        users[oldest]["role"] = "admin"
+    # Kein automatischer Aufstieg zum Administrator: neue Konten bleiben normale Nutzer,
+    # auch wenn auf dem PC noch kein Administrator existiert.
     return {"users": users}
 
 
@@ -1165,7 +1164,7 @@ class LoginDialog(ctk.CTkToplevel):
         self.result = None
         self._done = False
         self.acc = load_accounts()
-        self.setup_mode = not has_accounts(self.acc)  # noch kein Konto: das erste wird Administrator
+        self.setup_mode = not has_accounts(self.acc)  # noch kein Konto: das erste ist ein normaler Nutzer
         self.title("Wallura – Konto einrichten" if self.setup_mode else "Wallura – Anmelden")
         self.configure(fg_color=BG)
         self.resizable(False, False)
@@ -1189,7 +1188,8 @@ class LoginDialog(ctk.CTkToplevel):
 
         ctk.CTkLabel(box, text="Konto einrichten" if self.setup_mode else "Anmelden",
                      font=ui_font(18, "bold"), text_color=TEXT, anchor="w").pack(fill="x", padx=24, pady=(10, 2))
-        ctk.CTkLabel(box, text=("Das erste Konto wird Administrator und darf Tools, Updates und Benutzer verwalten."
+        ctk.CTkLabel(box, text=(f"Das Konto ist ein normaler Nutzer. Administratorrechte hat nur das "
+                               f"Besitzerkonto „{ADMIN_NAME}“ (bzw. wer von ihm zum Administrator gemacht wird)."
                                if self.setup_mode else "Bitte mit Name und Passwort anmelden. Wallpaper und "
                                "Bibliothek bleiben beim Anmelden erhalten."),
                      font=ui_font(11), text_color=MUTED, anchor="w", justify="left",
@@ -1240,12 +1240,13 @@ class LoginDialog(ctk.CTkToplevel):
             if pw != self.e_pw2.get():
                 self.err.configure(text="Die Passwörter sind nicht gleich.")
                 return
-            ok, err = create_account(self.acc, name, pw, "admin")
+            role = "admin" if name.lower() == ADMIN_NAME.lower() else "user"
+            ok, err = create_account(self.acc, name, pw, role)
             if not ok:
                 self.err.configure(text=err)
                 return
             user = find_account(self.acc, name)
-            self._finish({"name": user.get("name", name), "role": user.get("role", "admin"),
+            self._finish({"name": user.get("name", name), "role": user.get("role", role),
                           "remember": True})
         else:
             user = authenticate(self.acc, name, pw)

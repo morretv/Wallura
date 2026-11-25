@@ -10,13 +10,34 @@ android {
         applicationId 'de.wallura.app'
         minSdk 24
         targetSdk 34
-        versionCode 10600
-        versionName '1.6.0'
+        versionCode 10601
+        versionName '1.6.1'
+    }
+
+    // Fester Signaturschlüssel im Projekt: jede APK hat dieselbe Signatur.
+    // Mit dem zufälligen Debug-Schlüssel der CI war jeder Build anders signiert –
+    // Android verweigerte dann Installation/Update mit „App nicht installiert“.
+    signingConfigs {
+        release {
+            storeFile file('wallura-release.jks')
+            storePassword 'WalluraRelease2026'
+            keyAlias 'wallura'
+            keyPassword 'WalluraRelease2026'
+            enableV1Signing true
+            enableV2Signing true
+            enableV3Signing true
+        }
     }
 
     buildTypes {
         release {
             minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+        debug {
+            // Auch Testbauten mit demselben Schlüssel signieren, damit sie sich
+            // gegenseitig und über die Release-APK installieren lassen.
+            signingConfig signingConfigs.release
         }
     }
 
