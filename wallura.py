@@ -107,7 +107,7 @@ YT_ID_RE = re.compile(r"(?:v=|youtu\.be/|/shorts/|/embed/|/live/)([A-Za-z0-9_-]{
 
 FIT_MAP = {"Füllen (zuschneiden)": "cover", "Einpassen (Balken)": "contain", "Strecken": "stretch"}
 QUALITIES = ["720", "1080", "1440", "2160"]
-FPS_MAP = {"Original": 0, "60 FPS": 60, "30 FPS": 30}
+FPS_MAP = {"Original": 0, "60 FPS": 60, "30 FPS": 30, "24 FPS (sparsam)": 24}
 ROTATE_MAP = {"Aus": 0, "Alle 5 Minuten": 5, "Alle 15 Minuten": 15, "Alle 30 Minuten": 30,
               "Jede Stunde": 60, "Alle 3 Stunden": 180}
 SORTS = {"Zuletzt hinzugefügt": "new", "Titel A–Z": "az", "Meistgesehen": "plays",
@@ -898,6 +898,18 @@ def on_battery():
         return False
 
 
+def session_locked():
+    """True, wenn Windows gesperrt ist (Anmeldebildschirm) – dann muss nichts gerendert werden."""
+    try:
+        handle = ctypes.windll.user32.OpenInputDesktop(0, False, 0x0001)  # DESKTOP_READOBJECTS
+        if not handle:
+            return True  # gesperrt oder sicherer Desktop (z. B. UAC)
+        ctypes.windll.user32.CloseDesktop(handle)
+        return False
+    except Exception:
+        return False
+
+
 def covered_monitor_rects():
     """Monitore, die gerade von einem maximierten Fenster im Vordergrund verdeckt werden."""
     try:
@@ -928,16 +940,11 @@ local function apply(cap)
     end
 end
 if hflip then apply(false) end
-mp.observe_property("container-fps", "number", function(_, fps)
+    mp.observe_property("container-fps", "number", function(_, fps)
     if limit <= 0 or not fps then return end
     local want = fps > limit + 1
     if want ~= capped then
         capped = want
-        if want then
-            mp.set_property("hwdec", "auto-copy-safe")
-        else
-            mp.set_property("hwdec", "auto-safe")
-        end
         apply(capped)
     end
 end)
@@ -996,16 +1003,23 @@ class Player:
     def _base_cmd(self, mpv, ytdlp):
         q = self.cfg.get("quality", "1080")
         vol = int(self.cfg.get("volume", 0))
+        audio = vol > 0
         fit = self.cfg.get("fit", "cover")
         base = [mpv, "--no-config", "--force-window=immediate", "--no-border", "--no-osc", "--osd-level=0",
                 "--no-input-default-bindings", "--window-dragging=no", "--input-cursor=no", "--loop-file=inf", "--keep-open=yes",
                 "--image-display-duration=inf", "--stop-screensaver=no", "--hwdec=auto-safe",
                 "--audio-display=no", "--scale=bilinear", "--cscale=bilinear", "--dscale=bilinear", "--dither=no",
-                "--correct-downscaling=no", "--interpolation=no", "--deband=no", "--video-sync=audio",
-                "--framedrop=vo", "--sub-auto=no", "--sid=no", "--demuxer-max-bytes=64MiB",
-                "--demuxer-max-back-bytes=16MiB", f"--volume={vol}", f"--mute={'yes' if vol == 0 else 'no'}",
-                "--ytdl=yes", f"--ytdl-format=bv*[height<=?{q}]+ba/b[height<=?{q}]/b",
+                "--correct-downscaling=no", "--interpolation=no", "--deband=no",
+                "--framedrop=vo", "--sub-auto=no", "--sid=no", "--demuxer-max-bytes=32MiB",
+                "--demuxer-max-back-bytes=8MiB", f"--volume={vol}", f"--mute={'no' if audio else 'yes'}",
+                "--ytdl=yes",
+                "--ytdl-format=" + (f"bv*[height<=?{q}]+ba/b[height<=?{q}]/b" if audio
+                                    else f"bv*[height<=?{q}]/b[height<=?{q}]/b"),
                 "--ytdl-raw-options=no-playlist=", "--no-terminal", "--msg-level=all=warn"]
+        if audio:
+            base.append("--video-sync=audio")
+        else:  # stumm: keine Audiospur laden, kein Audio-Takt -> weniger CPU, ruhigeres Bild
+            base += ["--aid=no", "--ao=null", "--video-sync=desync"]
         if ytdlp:
             base.append("--script-opts=ytdl_hook-ytdl_path=" + ytdlp.replace("\\", "/"))
         fps_limit = int(self.cfg.get("fps_limit", 30) or 0)
@@ -1116,8 +1130,9 @@ class Player:
                 continue
             pipe = rf"\\.\pipe\wallura_{os.getpid()}_{idx}"
             log = DATA_DIR / f"mpv_{idx}.log"
-            cmd = base + [f"--title=Wallura-{os.getpid()}-{idx}", f"--input-ipc-server={pipe}",
-                          f"--log-file={log}", src]
+            extra = ["--cache=no"] if item["kind"] == "local" else []  # lokale Dateien brauchen keinen Puffer
+            cmd = base + extra + [f"--title=Wallura-{os.getpid()}-{idx}", f"--input-ipc-server={pipe}",
+                                  f"--log-file={log}", src]
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                     creationflags=CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY)
             self._add_to_job(proc)
@@ -1237,7 +1252,8 @@ class Player:
                     threading.Thread(target=self._drop, args=(idx,), daemon=True).start()
             alive = [i for i in insts.values() if i["proc"].poll() is None]
             want = (self.paused_manual
-                    or (self.cfg.get("pause_fullscreen", True) and fullscreen_app_active())
+                    or (self.cfg.get("pause_fullscreen", True)
+                        and (fullscreen_app_active() or session_locked()))
                     or (self.cfg.get("pause_battery", False) and on_battery()))
             if want != self._paused:
                 self._apply_pause(want)
@@ -1247,7 +1263,7 @@ class Player:
                 if should != inst.get("cover_paused", False):
                     inst["cover_paused"] = should
                     self._ipc(inst, ["set_property", "pause", should])
-            if self._tick % 2 == 0:
+            if self._tick % 3 == 0:  # seltener prüfen: jedes SetWindowPos kostet einen Frame
                 for inst in alive:
                     try:
                         hwnd = inst["hwnd"]
@@ -1261,7 +1277,9 @@ class Player:
                             continue
                         l, t, r, b = win32gui.GetWindowRect(hwnd)
                         x, y, w, h = inst["rect"]
-                        if (l, t, r - l, b - t) != (x, y, w, h):
+                        # ein paar Pixel Toleranz: sonst wird bei DPI-Rundung jedes Mal neu gesetzt (Ruckler)
+                        if (abs(l - x) > 2 or abs(t - y) > 2
+                                or abs((r - l) - w) > 2 or abs((b - t) - h) > 2):
                             place(hwnd, inst["rect"])
                     except Exception:
                         pass
@@ -2079,7 +2097,9 @@ class App(ctk.CTk):
                                           **self._menu_style())
         self.fit_menu.set(next((k for k, v in FIT_MAP.items() if v == self.cfg["fit"]), list(FIT_MAP)[0]))
         self.fit_menu.grid(row=0, column=1, sticky="e", padx=(16, 0))
-        row = self._row(play, "Max. FPS", "Weniger Bilder pro Sekunde sparen Leistung und Akku.")
+        row = self._row(play, "Max. FPS",
+                        "Weniger Bilder pro Sekunde sparen Leistung und Akku – „24 FPS (sparsam)“ "
+                        "reicht für die meisten Wallpaper.")
         self.fps_menu = ctk.CTkOptionMenu(row, values=list(FPS_MAP), command=self.on_fps, width=200,
                                           **self._menu_style())
         self.fps_menu.set(next((k for k, v in FPS_MAP.items() if v == self.cfg.get("fps_limit", 30)), "30 FPS"))
@@ -2132,7 +2152,7 @@ class App(ctk.CTk):
         # System und Tools & Updates stehen jedem zur Verfügung – auch ohne Konto (Gastmodus).
         sysp = self._section(inner, "System", "Start, Ruhezeiten und Verhalten im Hintergrund.")
         self.sw_pause = self._switch_row(sysp, "Pause, wenn der Desktop verdeckt ist",
-                                         "Spart Leistung, solange Spiele oder Vollbild-Apps laufen.",
+                                         "Spart Leistung bei Spielen, Vollbild-Apps und gesperrtem Windows.",
                                          self.on_pause_fs, self.cfg["pause_fullscreen"])
         self.sw_auto = self._switch_row(sysp, "Mit Windows starten",
                                         "Wallura startet im Hintergrund (Tray-Symbol).",
@@ -2337,6 +2357,16 @@ class App(ctk.CTk):
         th = tw * 9 // 16
         W, H = tw * 2, th * 2   # doppelt so groß zeichnen = scharf auf hochauflösenden Monitoren
         p = THUMB_DIR / f"{item['id']}.jpg"
+        cache = getattr(self, "_thumb_cache", None)
+        if cache is None:
+            cache = self._thumb_cache = {}
+        try:
+            mtime = p.stat().st_mtime if p.exists() else 0
+        except OSError:
+            mtime = 0
+        key = (item["id"], tw, active_text, int(item.get("plays", 0) or 0), mtime)
+        if key in cache:  # nicht bei jedem Neuaufbau alle Bilder erneut laden und skalieren
+            return cache[key]
         try:
             img = Image.open(p).convert("RGB") if p.exists() else placeholder()
         except Exception:
@@ -2353,7 +2383,11 @@ class App(ctk.CTk):
         mask = Image.new("L", img.size, 0)
         ImageDraw.Draw(mask).rounded_rectangle((0, 0, W - 1, H - 1), radius=28, fill=255)
         img.putalpha(mask)
-        return ctk.CTkImage(img, size=(tw, th))
+        image = ctk.CTkImage(img, size=(tw, th))
+        if len(cache) > 160:
+            cache.clear()  # Speicher begrenzen
+        cache[key] = image
+        return image
 
     def refresh_library(self):
         self._refresh_monitor_ui()
@@ -3257,9 +3291,12 @@ class App(ctk.CTk):
     # -- Einstellungen
     def on_volume(self, v):
         vol = max(0, min(100, int(round(float(v)))))
+        old = int(self.cfg.get("volume", 0) or 0)
         self.vol_lbl.configure(text=f"{vol} %")
         self.cfg["volume"] = vol
         self.player.set_volume(vol)
+        if (old == 0) != (vol == 0):  # stumm <-> mit Ton: Audiospur neu laden/abschalten
+            self.restart_current()
         if self._volume_job is not None:  # nicht bei jedem Pixel der Leiste auf die Platte schreiben
             self.after_cancel(self._volume_job)
         self._volume_job = self.after(400, self._save_volume)
