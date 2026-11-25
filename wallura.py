@@ -1769,7 +1769,7 @@ class PasswordDialog(ctk.CTkToplevel):
         self._done = False
         self.title(title)
         self.configure(fg_color=BG)
-        self.resizable(False, False)
+        self.resizable(True, True)
         try:
             self.transient(parent)
         except Exception:
@@ -1777,14 +1777,10 @@ class PasswordDialog(ctk.CTkToplevel):
 
         box = ctk.CTkFrame(self, fg_color=SURFACE, corner_radius=CARD_RADIUS)
         box.pack(fill="both", expand=True, padx=16, pady=16)
-        ctk.CTkLabel(box, text=title, font=ui_font(19, "bold"), text_color=TEXT,
-                     anchor="w").pack(fill="x", padx=24, pady=(22, 2))
-        ctk.CTkLabel(box, text=subtitle, font=ui_font(11), text_color=MUTED, anchor="w", justify="left",
-                     wraplength=350).pack(fill="x", padx=24, pady=(0, 4))
 
-        # Buttons zuerst von unten packen: so werden sie auch bei knapper Fensterhöhe nie abgeschnitten.
+        # Fußzeile zuerst packen: Bestätigen/Abbrechen sind bei jeder Fenstergröße sichtbar.
         btns = ctk.CTkFrame(box, fg_color="transparent")
-        btns.pack(side="bottom", fill="x", padx=24, pady=(18, 22))
+        btns.pack(side="bottom", fill="x", padx=24, pady=(12, 18))
         self._ok_btn = ctk.CTkButton(btns, text=ok_text, height=40, corner_radius=BTN_RADIUS,
                                      fg_color=ACCENT, hover_color=ACCENT_HOVER, text_color=ON_ACCENT,
                                      font=ui_font(13, "bold"), command=self._ok)
@@ -1793,33 +1789,48 @@ class PasswordDialog(ctk.CTkToplevel):
                       hover_color=SURFACE2, text_color=MUTED, border_width=1, border_color=BORDER,
                       font=ui_font(13), command=self.cancel).pack(side="right", padx=(0, 10), width=120)
 
+        ctk.CTkLabel(box, text=title, font=ui_font(19, "bold"), text_color=TEXT,
+                     anchor="w").pack(fill="x", padx=24, pady=(22, 2))
+        ctk.CTkLabel(box, text=subtitle, font=ui_font(11), text_color=MUTED, anchor="w", justify="left",
+                     wraplength=360).pack(fill="x", padx=24, pady=(0, 6))
+
+        # Inhalt scrollbar: Felder können nie unter den Fensterrand rutschen.
+        body = ctk.CTkScrollableFrame(box, fg_color="transparent", corner_radius=0,
+                                      scrollbar_button_color=BORDER, scrollbar_button_hover_color=MUTED)
+        body.pack(fill="both", expand=True, padx=(18, 6))
+        inner = ctk.CTkFrame(body, fg_color="transparent")
+        inner.pack(fill="x")
+
         self._first = None
         for field in fields:
-            ctk.CTkLabel(box, text=field["label"], font=ui_font(12), text_color=TEXT,
-                         anchor="w").pack(fill="x", padx=24, pady=(12, 4))
+            ctk.CTkLabel(inner, text=field["label"], font=ui_font(12), text_color=TEXT,
+                         anchor="w").pack(fill="x", padx=6, pady=(10, 4))
             var = ctk.StringVar()
-            entry = ctk.CTkEntry(box, textvariable=var, show="•", height=38, corner_radius=BTN_RADIUS,
+            entry = ctk.CTkEntry(inner, textvariable=var, show="•", height=38, corner_radius=BTN_RADIUS,
                                  fg_color=SURFACE2, border_color=BORDER, border_width=1,
                                  text_color=TEXT, font=ui_font(13))
-            entry.pack(fill="x", padx=24)
+            entry.pack(fill="x", padx=6)
             self._entries.append(entry)
             if self._first is None:
                 self._first = entry
             self._vars[field["key"]] = var
 
         self._show_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(box, text="Passwort anzeigen", variable=self._show_var, command=self._toggle_show,
+        ctk.CTkCheckBox(inner, text="Passwort anzeigen", variable=self._show_var, command=self._toggle_show,
                         font=ui_font(11), text_color=MUTED, fg_color=ACCENT, hover_color=ACCENT_HOVER,
                         border_color=BORDER, checkbox_width=17, checkbox_height=17).pack(
-            fill="x", padx=24, pady=(10, 0))
+            fill="x", padx=6, pady=(10, 0))
 
-        self._err = ctk.CTkLabel(box, text="", font=ui_font(11), text_color=STATUS_ERR, anchor="w",
-                                 justify="left", wraplength=350)
-        self._err.pack(fill="x", padx=24, pady=(8, 0))
+        self._err = ctk.CTkLabel(inner, text="", font=ui_font(11), text_color=STATUS_ERR, anchor="w",
+                                 justify="left", wraplength=360)
+        self._err.pack(fill="x", padx=6, pady=(8, 6))
 
         self.bind("<Return>", lambda e: self._ok())
         self.bind("<Escape>", lambda e: self.cancel())
         self._center(parent)
+        self.after(120, self._fit_content)
+        self.after(400, self._fit_content)
+        self.after(900, self._fit_content)
         self.after(150, self._activate)
 
     def _toggle_show(self):
@@ -1843,16 +1854,48 @@ class PasswordDialog(ctk.CTkToplevel):
         if self._first is not None:
             self._first.focus_set()
 
+    def _scale(self):
+        try:
+            return max(1.0, float(self._get_window_scaling()))
+        except Exception:
+            return 1.0
+
+    def _wanted_height(self):
+        """Nie auf die (DPI-abhängig ungenaue) Wunschgröße verlassen: pro Feld großzügig Platz."""
+        floor = (380 + 96 * max(1, len(self._entries))) * self._scale()
+        return max(self.winfo_reqheight() + 20, int(floor))
+
     def _center(self, parent):
         self.update_idletasks()
-        w, h = max(440, self.winfo_reqwidth()), self.winfo_reqheight() + 4
-        self.minsize(w, min(h, 320))
+        w, h = max(int(470 * self._scale()), self.winfo_reqwidth()), self._wanted_height()
+        w = min(w, self.winfo_screenwidth() - 40)
+        self.minsize(w, int(340 * self._scale()))
         try:
             px, py, pw, ph = (parent.winfo_rootx(), parent.winfo_rooty(),
                               parent.winfo_width(), parent.winfo_height())
         except Exception:
             px, py, pw, ph = 0, 0, self.winfo_screenwidth(), self.winfo_screenheight()
+        h = min(h, self.winfo_screenheight() - 80)
         self.geometry(f"{w}x{h}+{px + max(0, (pw - w) // 2)}+{py + max(0, (ph - h) // 3)}")
+
+    def _fit_content(self):
+        """Messt die tatsächliche Lage der Kinder und vergrößert das Fenster, falls etwas herausragt."""
+        try:
+            self.update_idletasks()
+            kids = self.winfo_children()
+            if not kids:
+                return
+            box = kids[0]
+            bottom = 0
+            for child in box.winfo_children():
+                if child.winfo_ismapped():
+                    bottom = max(bottom, child.winfo_y() + child.winfo_height())
+            need = max(self._wanted_height(), bottom + 2 * max(0, box.winfo_y()) + 10)
+            if need > self.winfo_height() + 2:
+                self.geometry(f"{self.winfo_width()}x{min(need, self.winfo_screenheight() - 60)}+"
+                              f"{self.winfo_x()}+{self.winfo_y()}")
+        except Exception:
+            pass
 
     def _ok(self):
         if self._done:
