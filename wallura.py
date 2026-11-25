@@ -1143,6 +1143,8 @@ def render_desk_image(desk, size=(1920, 1080), when=None, still=None):
 
 
 DESK_LUA_BODY = r'''
+-- osd-overlay erwartet eine Ganzzahl 0-63 als id, keine Zeichenkette
+local OVL = 27
 local function esc(s)
     return (s:gsub("\\", ""):gsub("{", "("):gsub("}", ")"))
 end
@@ -1163,7 +1165,7 @@ local function draw()
         lines[#lines + 1] = {esc(CFG.text), sub, false}
     end
     if #lines == 0 then
-        mp.command_native({name = "osd-overlay", id = "wallura-desk", format = "none"})
+        mp.command_native({name = "osd-overlay", id = OVL, format = "none"})
         return
     end
     local hs, total = {}, 0
@@ -1196,7 +1198,7 @@ local function draw()
             "Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an%d\\pos(%d,%d)\\fs%d\\c&H%s&\\3c&H000000&\\bord3\\shad0\\b%d\\fnSegoe UI}%s",
             an, x, y, lines[i][2], CFG.color, lines[i][3] and 1 or 0, lines[i][1])
     end
-    mp.command_native({name = "osd-overlay", id = "wallura-desk", format = "ass-events",
+    mp.command_native({name = "osd-overlay", id = OVL, format = "ass-events",
                        data = table.concat(events, "\n"), res_x = CFG.w, res_y = CFG.h})
 end
 local function safe_draw()
@@ -1295,7 +1297,9 @@ class Player:
         script = desk_script(self.cfg.get("desk") or {}, rect[2], rect[3])
         if not script:
             return []
-        return [f"--script={script}", "--osd-level=2"]
+        # level 1: eigene osd-overlays werden gezeichnet, mpv blendet aber
+        # keine eigene Uhrzeit/Statuszeile oben links ein (das macht level 2).
+        return [f"--script={script}", "--osd-level=1"]
 
     def _add_to_job(self, proc):
         if self.job:
