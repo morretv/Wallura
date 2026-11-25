@@ -43,7 +43,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 # ----------------------------------------------------------------------------- Pfade
 APP_NAME = "Wallura"
 COPYRIGHT = "© 2026 MorreTv. Open Source (MIT)"
-APP_VERSION = "1.7.0"   # wird vom Build / GitHub-Workflow aus dem Release-Tag gesetzt
+APP_VERSION = "1.8.0"   # wird vom Build / GitHub-Workflow aus dem Release-Tag gesetzt
 # GitHub-Repo für automatische Updates ("benutzername/repo"). Dort muss pro Version ein Release
 # mit der Datei Wallura-Setup.exe liegen (Repo bzw. Releases müssen öffentlich sein).
 GITHUB_REPO = "MorreTv/Wallura"
@@ -103,6 +103,10 @@ QUALITIES = ["720", "1080", "1440", "2160"]
 FPS_MAP = {"Original": 0, "60 FPS": 60, "30 FPS": 30}
 ROTATE_MAP = {"Aus": 0, "Alle 5 Minuten": 5, "Alle 15 Minuten": 15, "Alle 30 Minuten": 30,
               "Jede Stunde": 60, "Alle 3 Stunden": 180}
+SORTS = {"Zuletzt hinzugefügt": "new", "Titel A–Z": "az", "Meistgesehen": "plays",
+         "Favoriten zuerst": "fav"}
+SPEED_MAP = {"0,5×": 0.5, "0,75×": 0.75, "Normal": 1.0, "1,25×": 1.25, "1,5×": 1.5, "2×": 2.0}
+BRIGHT_MAP = {"100 %": 100, "85 %": 85, "70 %": 70, "50 %": 50}
 BELOW_NORMAL_PRIORITY = 0x00004000
 KIND_LABEL = {"local": "Lokal", "youtube": "YouTube", "web": "Web"}
 KIND_FILTER = {"Alle": None, "★ Favoriten": "fav", "Lokal": "local", "YouTube": "youtube", "Web": "web"}
@@ -116,7 +120,20 @@ DEFAULTS = {
     "monitor": "all",
     "quality": "1080",
     "fps_limit": 30,
-    "rotate_min": 0,     # automatischer Wechsel in Minuten (0 = aus)
+    "rotate_min": 0,      # automatischer Wechsel in Minuten (0 = aus)
+    "sort": "new",       # Reihenfolge der Bibliothek
+    "fav_playlist": False,  # Wechsel nur mit Favoriten
+    "quiet_hours": False,   # nachts (22–7 Uhr) nicht automatisch wechseln
+    "pause_battery": False,  # im Akkubetrieb pausieren
+    "random_start": False,   # beim Start ein zufälliges Wallpaper
+    "notify_rotate": True,   # Hinweis beim automatischen Wechsel
+    "speed": 1.0,        # Wiedergabegeschwindigkeit
+    "flip": False,       # Bild horizontal spiegeln
+    "rotate180": False,  # Bild um 180° drehen
+    "brightness": 100,   # Helligkeit in Prozent
+    "grayscale": False,  # Schwarzweiß
+    "night_id": "",      # Wallpaper für die Nacht (20–7 Uhr)
+    "last_kind": "Alle", # zuletzt gewählter Bibliotheksfilter
     "pause_fullscreen": True,
     "autostart": False,
     "auto_update": True,
@@ -213,6 +230,22 @@ def load_config():
     cfg["monitor"] = str(cfg.get("monitor") or "all")
     cfg["update_repo"] = cfg["update_repo"] if isinstance(cfg.get("update_repo"), str) else ""
     for key in ("pause_fullscreen", "autostart", "auto_update"):
+        cfg[key] = _as_bool(cfg.get(key), DEFAULTS[key])
+    cfg["sort"] = cfg.get("sort") if cfg.get("sort") in SORTS.values() else DEFAULTS["sort"]
+    try:
+        speed = float(cfg.get("speed", 1.0))
+    except (TypeError, ValueError):
+        speed = 1.0
+    cfg["speed"] = speed if speed in SPEED_MAP.values() else DEFAULTS["speed"]
+    try:
+        bright = int(cfg.get("brightness", 100))
+    except (TypeError, ValueError):
+        bright = 100
+    cfg["brightness"] = bright if bright in BRIGHT_MAP.values() else DEFAULTS["brightness"]
+    cfg["night_id"] = cfg.get("night_id") if isinstance(cfg.get("night_id"), str) else ""
+    cfg["last_kind"] = cfg.get("last_kind") if cfg.get("last_kind") in KIND_FILTER else DEFAULTS["last_kind"]
+    for key in ("fav_playlist", "quiet_hours", "pause_battery", "random_start", "notify_rotate",
+                "flip", "rotate180", "grayscale"):
         cfg[key] = _as_bool(cfg.get(key), DEFAULTS[key])
     return cfg
 
@@ -788,6 +821,23 @@ def fullscreen_app_active():
         return False
 
 
+class _POWER_STATUS(ctypes.Structure):
+    _fields_ = [("ACLineStatus", ctypes.c_ubyte), ("BatteryFlag", ctypes.c_ubyte),
+                ("BatteryLifePercent", ctypes.c_ubyte), ("Reserved1", ctypes.c_ubyte),
+                ("BatteryLifeTime", ctypes.c_ulong), ("BatteryFullLifeTime", ctypes.c_ulong)]
+
+
+def on_battery():
+    """True, wenn der PC gerade nicht am Strom hängt (z. B. Laptop im Akkubetrieb)."""
+    try:
+        status = _POWER_STATUS()
+        if not ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(status)):
+            return False
+        return status.ACLineStatus == 0
+    except Exception:
+        return False
+
+
 def covered_monitor_rects():
     """Monitore, die gerade von einem maximierten Fenster im Vordergrund verdeckt werden."""
     try:
@@ -804,19 +854,31 @@ def covered_monitor_rects():
 
 # Begrenzt die Bildrate nur bei Videos, die schneller sind als das Limit (kein Ruckeln bei 24/30 fps)
 FPS_LUA = """local limit = tonumber(mp.get_opt("wallura-fps")) or 0
+local hflip = mp.get_opt("wallura-hflip") == "yes"
 local capped = false
+local function apply(cap)
+    local parts = {}
+    if cap and limit > 0 then parts[#parts + 1] = "fps=" .. limit end
+    if hflip then parts[#parts + 1] = "hflip" end
+    local chain = table.concat(parts, ",")
+    if chain == "" then
+        mp.commandv("vf", "clr", "")
+    else
+        mp.commandv("vf", "set", chain)
+    end
+end
+if hflip then apply(false) end
 mp.observe_property("container-fps", "number", function(_, fps)
     if limit <= 0 or not fps then return end
-    if fps > limit + 1 then
-        if not capped then
-            capped = true
+    local want = fps > limit + 1
+    if want ~= capped then
+        capped = want
+        if want then
             mp.set_property("hwdec", "auto-copy-safe")
+        else
+            mp.set_property("hwdec", "auto-safe")
         end
-        mp.commandv("vf", "set", "fps=" .. limit)
-    elseif capped then
-        capped = false
-        mp.commandv("vf", "clr", "")
-        mp.set_property("hwdec", "auto-safe")
+        apply(capped)
     end
 end)
 """
@@ -887,9 +949,21 @@ class Player:
         if ytdlp:
             base.append("--script-opts=ytdl_hook-ytdl_path=" + ytdlp.replace("\\", "/"))
         fps_limit = int(self.cfg.get("fps_limit", 30) or 0)
-        script = fps_script() if fps_limit else None
+        flip = bool(self.cfg.get("flip"))
+        script = fps_script() if (fps_limit or flip) else None
         if script:
-            base += [f"--script={script}", f"--script-opts-append=wallura-fps={fps_limit}"]
+            base += [f"--script={script}", f"--script-opts-append=wallura-fps={fps_limit}",
+                     f"--script-opts-append=wallura-hflip={'yes' if flip else 'no'}"]
+        speed = float(self.cfg.get("speed", 1.0) or 1.0)
+        if speed != 1.0:
+            base.append(f"--speed={speed}")
+        if self.cfg.get("rotate180"):
+            base.append("--video-rotate=180")
+        if self.cfg.get("grayscale"):
+            base.append("--saturation=-100")
+        dim = int(self.cfg.get("brightness", 100) or 100)
+        if 0 < dim < 100:
+            base.append(f"--brightness={dim - 100}")
         if fit == "cover":
             base.append("--panscan=1.0")
         elif fit == "stretch":
@@ -1062,6 +1136,18 @@ class Player:
         self.paused_manual = paused
         self._apply_pause(paused)
 
+    def screenshot(self, folder):
+        """Speichert das laufende Bild jedes Monitors als PNG (mpv-Screenshot). -> [Pfade]"""
+        folder = Path(folder)
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        paths = []
+        for idx, inst in list(self.instances.items()):
+            path = folder / f"Wallura-{stamp}-Monitor{idx + 1}.png"
+            self._ipc(inst, ["screenshot-to-file", str(path), "window"])
+            paths.append(path)
+        return paths
+
     def _apply_pause(self, paused):
         self._paused = paused
         for inst in list(self.instances.values()):
@@ -1090,7 +1176,9 @@ class Player:
                 else:
                     threading.Thread(target=self._drop, args=(idx,), daemon=True).start()
             alive = [i for i in insts.values() if i["proc"].poll() is None]
-            want = self.paused_manual or (self.cfg.get("pause_fullscreen", True) and fullscreen_app_active())
+            want = (self.paused_manual
+                    or (self.cfg.get("pause_fullscreen", True) and fullscreen_app_active())
+                    or (self.cfg.get("pause_battery", False) and on_battery()))
             if want != self._paused:
                 self._apply_pause(want)
             covered = covered_monitor_rects() if (self.cfg.get("pause_fullscreen", True) and not self._paused) else set()
@@ -1339,7 +1427,7 @@ class FormDialog(ctk.CTkToplevel):
                 ctk.CTkOptionMenu(box, values=field["values"], variable=var,
                                   **MENU_STYLE).pack(fill="x", padx=20)
             else:
-                var = ctk.StringVar()
+                var = ctk.StringVar(value=field.get("value") or "")
                 entry = ctk.CTkEntry(box, textvariable=var, show="•" if field.get("type") == "pw" else "",
                                      height=34, corner_radius=10, fg_color=SURFACE2, border_color=BORDER,
                                      text_color=TEXT, font=ui_font(13))
@@ -1420,6 +1508,17 @@ class App(ctk.CTk):
         self._downloads = set()
         self._update_lock = threading.Lock()
         self._rotate_job = None
+        self._night_job = None
+        self._night_on = False
+        self._night_backup = {}
+        self._recent_random = []
+        if self.cfg.get("random_start") and self.cfg["items"]:
+            pick = random.choice(self.cfg["items"])
+            a = dict(self.cfg.get("assign", {}))
+            for i in range(len(get_monitors())):
+                a[str(i)] = pick["id"]
+            self.cfg["assign"] = a
+            save_config(self.cfg)
 
         self._build_ui()
         self.refresh_library()
@@ -1437,6 +1536,7 @@ class App(ctk.CTk):
             threading.Thread(target=self._startup_worker, args=(start_hidden,), daemon=True).start()
         cleanup_old_updates()
         self._schedule_rotate()
+        self._night_check()
         self.after(20000, self._auto_check)
 
     def _startup_worker(self, boot=False):
@@ -1701,12 +1801,19 @@ class App(ctk.CTk):
         frow = ctk.CTkFrame(lib, fg_color="transparent")
         frow.grid(row=1, column=0, sticky="we", pady=(0, 6))
         self.kind_filter = ctk.CTkSegmentedButton(
-            frow, values=list(KIND_FILTER), command=lambda _v: self.refresh_library(),
+            frow, values=list(KIND_FILTER), command=self.on_kind,
             fg_color=SURFACE, selected_color=ACCENT_DIM, selected_hover_color=ACCENT_DIM,
             unselected_color=SURFACE, unselected_hover_color=SURFACE2, text_color=TEXT,
             font=self._font(12), height=30, corner_radius=8)
-        self.kind_filter.set("Alle")
+        self.kind_filter.set(self.cfg.get("last_kind", "Alle"))
         self.kind_filter.pack(side="left")
+        self.sort_menu = ctk.CTkOptionMenu(frow, values=list(SORTS), command=self.on_sort, width=160,
+                                           **self._menu_style())
+        self.sort_menu.set(next((k for k, v in SORTS.items() if v == self.cfg.get("sort", "new")),
+                                "Zuletzt hinzugefügt"))
+        self.sort_menu.pack(side="left", padx=(8, 0))
+        self._btn(frow, "★  Zufall", self.random_favorite, "secondary", width=104, height=30,
+                  font=self._font(12)).pack(side="right", padx=(6, 0))
         self._btn(frow, "🎲  Zufällig", self.random_wallpaper, "secondary", width=130, height=30,
                   font=self._font(12)).pack(side="right")
 
@@ -1764,6 +1871,31 @@ class App(ctk.CTk):
                                           **self._menu_style())
         self.rot_menu.set(next((k for k, v in ROTATE_MAP.items() if v == self.cfg.get("rotate_min", 0)), "Aus"))
         self.rot_menu.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        row = self._row(play, "Geschwindigkeit", "Wiedergabe schneller oder langsamer.")
+        self.speed_menu = ctk.CTkOptionMenu(row, values=list(SPEED_MAP), command=self.on_speed, width=200,
+                                            **self._menu_style())
+        self.speed_menu.set(next((k for k, v in SPEED_MAP.items() if v == self.cfg.get("speed", 1.0)), "Normal"))
+        self.speed_menu.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        row = self._row(play, "Helligkeit", "Dunkelt das Wallpaper ab – abends angenehmer.")
+        self.br_menu = ctk.CTkOptionMenu(row, values=list(BRIGHT_MAP), command=self.on_brightness, width=200,
+                                         **self._menu_style())
+        self.br_menu.set(next((k for k, v in BRIGHT_MAP.items() if v == self.cfg.get("brightness", 100)),
+                              "100 %"))
+        self.br_menu.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        self.sw_flip = self._switch_row(play, "Bild spiegeln", "Spiegelt das Video horizontal.",
+                                        self.on_flip, self.cfg["flip"])
+        self.sw_rot180 = self._switch_row(play, "Bild um 180° drehen", "Für kopfüber gefilmte Videos.",
+                                          self.on_rotate180, self.cfg["rotate180"])
+        self.sw_gray = self._switch_row(play, "Schwarzweiß", "Graustufen statt Farbe.",
+                                        self.on_grayscale, self.cfg["grayscale"])
+        row = self._row(play, "Tag/Nacht-Wallpaper",
+                        "Zwischen 20 und 7 Uhr läuft automatisch das gewählte Nacht-Wallpaper.")
+        night_values = ["Aus"] + [shorten(i["title"], 28) for i in self.cfg["items"][:40]]
+        self.night_menu = ctk.CTkOptionMenu(row, values=night_values, command=self.on_night, width=200,
+                                            **self._menu_style())
+        cur_night = self.find_item(self.cfg.get("night_id") or "")
+        self.night_menu.set(shorten(cur_night["title"], 28) if cur_night else "Aus")
+        self.night_menu.grid(row=0, column=1, sticky="e", padx=(16, 0))
         row = self._row(play, "Max. Qualität (Streams, p)", "Gilt für YouTube/Web-Links und Downloads.")
         self.q_menu = ctk.CTkOptionMenu(row, values=QUALITIES, command=self.on_quality, width=200,
                                         **self._menu_style())
@@ -1779,6 +1911,18 @@ class App(ctk.CTk):
         self.sw_auto = self._switch_row(sysp, "Mit Windows starten",
                                         "Wallura startet im Hintergrund (Tray-Symbol).",
                                         self.on_autostart, is_autostart())
+        self.sw_quiet = self._switch_row(sysp, "Ruhezeiten (22–7 Uhr)",
+                                         "Nachts nicht automatisch wechseln.", self.on_quiet,
+                                         self.cfg["quiet_hours"])
+        self.sw_battery = self._switch_row(sysp, "Im Akkubetrieb pausieren",
+                                           "Spart Strom, sobald das Netzteil nicht angeschlossen ist.",
+                                           self.on_battery_pause, self.cfg["pause_battery"])
+        self.sw_random_start = self._switch_row(sysp, "Zufällig beim Start",
+                                                "Beim Start ein zufälliges Wallpaper statt des letzten.",
+                                                self.on_random_start, self.cfg["random_start"])
+        self.sw_notify = self._switch_row(sysp, "Hinweis beim Wechsel",
+                                          "Tray-Hinweis, wenn automatisch gewechselt wurde.",
+                                          self.on_notify_rotate, self.cfg["notify_rotate"])
         ctk.CTkFrame(sysp, height=6, fg_color="transparent").pack()
 
         tools = self._section(inner, "Tools & Updates")
@@ -1804,6 +1948,37 @@ class App(ctk.CTk):
             self._user_rows.pack(fill="x", padx=18, pady=(4, 0))
             ctk.CTkFrame(self._users_box, height=6, fg_color="transparent").pack()
             self._refresh_users()
+
+        lib_box = self._section(inner, "Bibliothek")
+        row = self._row(lib_box, "Sortierung", "Reihenfolge der Wallpaper in der Bibliothek.")
+        self.sort_menu_settings = ctk.CTkOptionMenu(row, values=list(SORTS), command=self.on_sort, width=200,
+                                                   **self._menu_style())
+        self.sort_menu_settings.set(next((k for k, v in SORTS.items() if v == self.cfg.get("sort", "new")),
+                                         "Zuletzt hinzugefügt"))
+        self.sort_menu_settings.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        row = self._row(lib_box, "Statistik", "…")
+        self.stats_lbl = row.desc
+        row = self._row(lib_box, "Sichern & Teilen",
+                        "Bibliotheksliste als JSON exportieren oder importieren (ohne Videodateien).")
+        acts = ctk.CTkFrame(row, fg_color="transparent")
+        acts.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        self._btn(acts, "Exportieren", self.export_library, "secondary", height=30, width=104,
+                  font=self._font(11)).pack(side="left", padx=2)
+        self._btn(acts, "Importieren", self.import_library, "secondary", height=30, width=104,
+                  font=self._font(11)).pack(side="left", padx=2)
+        row = self._row(lib_box, "Aufräumen", "Doppelte Einträge, Favoriten und Vorschaubilder.")
+        acts = ctk.CTkFrame(row, fg_color="transparent")
+        acts.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        self._btn(acts, "Duplikate", self.remove_duplicates, "ghost", height=30, width=88,
+                  font=self._font(11)).pack(side="left", padx=2)
+        self._btn(acts, "Favoriten löschen", self.clear_favorites, "ghost", height=30, width=132,
+                  font=self._font(11)).pack(side="left", padx=2)
+        self._btn(acts, "Vorschauen", self.rebuild_thumbs, "ghost", height=30, width=96,
+                  font=self._font(11)).pack(side="left", padx=2)
+        row = self._row(lib_box, "Screenshot", "Speichert das laufende Wallpaper als PNG im Datenordner.")
+        self._btn(row, "Aufnehmen", self.screenshot_now, "secondary", height=30, width=110,
+                  font=self._font(11)).grid(row=0, column=1, sticky="e", padx=(16, 0))
+        ctk.CTkFrame(lib_box, height=6, fg_color="transparent").pack()
 
         data = self._section(inner, "Daten")
         row = self._row(data, "Datenordner", f"{DATA_DIR}\nEinstellungen, Downloads, Vorschaubilder und mpv-Logs")
@@ -1849,6 +2024,8 @@ class App(ctk.CTk):
         self.vol_lbl.pack(side="left", padx=(6, 0))
 
         self._show_page("library")
+        self._bind_shortcuts()
+        self._update_stats()
 
     # -- Bibliothek
     def find_item(self, item_id):
@@ -1917,6 +2094,9 @@ class App(ctk.CTk):
         self._pill(d, 16, 16, KIND_LABEL.get(item["kind"], "?"), (13, 15, 19, 205), (233, 237, 242, 255), font)
         if active_text:
             self._pill(d, W - 16, 16, active_text, (76, 194, 255, 255), (6, 32, 46, 255), font, right=True)
+        plays = int(item.get("plays", 0) or 0)
+        if plays:
+            self._pill(d, 16, H - 60, f"{plays}×", (13, 15, 19, 205), (233, 237, 242, 255), font)
         mask = Image.new("L", img.size, 0)
         ImageDraw.Draw(mask).rounded_rectangle((0, 0, W - 1, H - 1), radius=28, fill=255)
         img.putalpha(mask)
@@ -1924,6 +2104,7 @@ class App(ctk.CTk):
 
     def refresh_library(self):
         self._refresh_monitor_ui()
+        self._update_stats()
         for w in self.scroll.winfo_children():
             w.destroy()
         on = {}
@@ -1980,6 +2161,7 @@ class App(ctk.CTk):
         lbl = ctk.CTkLabel(card, image=self._thumb_image(item, tw, where), text="", cursor="hand2")
         lbl.pack(padx=10, pady=(10, 8))
         lbl.bind("<Button-1>", lambda e, it=item: self.apply(it))
+        lbl.bind("<Double-Button-1>", lambda e, it=item: self.apply_all(it))
         if not active:
             lbl.bind("<Enter>", lambda e, cd=card: cd.configure(border_color=ACCENT_DIM))
             lbl.bind("<Leave>", lambda e, cd=card: cd.configure(border_color=BORDER))
@@ -1991,6 +2173,9 @@ class App(ctk.CTk):
         self._btn(row, "▶  Anwenden", lambda it=item: self.apply(it), "secondary" if active else "primary",
                   height=32, width=10, font=self._font(12, "bold")).grid(row=0, column=0, sticky="we")
         col = 1
+        self._btn(row, "✎", lambda it=item: self.rename_item(it), "ghost", width=32, height=32).grid(
+            row=0, column=col, padx=(6, 0))
+        col += 1
         self._btn(row, "★" if item.get("fav") else "☆", lambda it=item: self.toggle_favorite(it),
                   "ghost", width=32, height=32,
                   text_color=ACCENT if item.get("fav") else MUTED).grid(row=0, column=col, padx=(6, 0))
@@ -2004,12 +2189,12 @@ class App(ctk.CTk):
 
     # -- Favoriten, Zufall und automatischer Wechsel
     def _visible_items(self):
-        """Wallpaper, die gerade in der Bibliothek sichtbar sind (Suche + Filter)."""
+        """Wallpaper, die gerade in der Bibliothek sichtbar sind (Suche + Filter + Sortierung)."""
         q = self.search_var.get().strip().lower()
         kind = KIND_FILTER.get(self.kind_filter.get())
         out = []
         for it in self.cfg["items"]:
-            if q and q not in str(it.get("title", "")).lower():
+            if q and q not in str(it.get("title", "")).lower() and q not in str(it.get("src", "")).lower():
                 continue
             if kind == "fav":
                 if not it.get("fav"):
@@ -2017,7 +2202,31 @@ class App(ctk.CTk):
             elif kind and it["kind"] != kind:
                 continue
             out.append(it)
+        sort = self.cfg.get("sort", "new")
+        if sort == "az":
+            out.sort(key=lambda i: str(i.get("title", "")).lower())
+        elif sort == "plays":
+            out.sort(key=lambda i: (-int(i.get("plays", 0) or 0), str(i.get("title", "")).lower()))
+        elif sort == "fav":
+            out.sort(key=lambda i: (not bool(i.get("fav")), -int(i.get("plays", 0) or 0),
+                                    str(i.get("title", "")).lower()))
+        else:
+            out.sort(key=lambda i: -float(i.get("added", 0) or 0))
         return out
+
+    def on_kind(self, value):
+        self.cfg["last_kind"] = value if value in KIND_FILTER else "Alle"
+        save_config(self.cfg)
+        self.refresh_library()
+
+    def on_sort(self, label):
+        self.cfg["sort"] = SORTS.get(label, "new")
+        save_config(self.cfg)
+        if hasattr(self, "sort_menu"):
+            self.sort_menu.set(label)
+        if hasattr(self, "sort_menu_settings"):
+            self.sort_menu_settings.set(label)
+        self.refresh_library()
 
     def toggle_favorite(self, item):
         item["fav"] = not bool(item.get("fav"))
@@ -2026,23 +2235,84 @@ class App(ctk.CTk):
         self.set_status(f"{'Zu Favoriten hinzugefügt' if item['fav'] else 'Aus Favoriten entfernt'}: "
                         f"{shorten(item['title'], 40)}")
 
-    def random_wallpaper(self):
+    def rename_item(self, item):
+        res = self._form("Titel ändern", [{"key": "title", "label": "Neuer Titel", "type": "text",
+                                           "value": item["title"]}],
+                         f"Bisher: {shorten(item['title'], 70)}", "Speichern")
+        if res is None:
+            return
+        title = (res.get("title") or "").strip()
+        if not title:
+            self.set_status("Der Titel darf nicht leer sein.", True)
+            return
+        item["title"] = title[:120]
+        save_config(self.cfg)
+        self.refresh_library()
+        self.set_status(f"Titel geändert: {shorten(item['title'], 50)}")
+
+    def _random_pick(self, items):
+        """Zufall ohne direkte Wiederholung der zuletzt gezogenen Wallpaper."""
+        if not items:
+            return None
+        pool = [i for i in items if i["id"] not in self._recent_random] or list(items)
+        pick = random.choice(pool)
+        self._recent_random = ([pick["id"]] + self._recent_random)[:3]
+        return pick
+
+    def random_wallpaper(self, favorites=False):
         """Ein zufälliges Wallpaper aus der aktuellen Auswahl (Filter/Suche)."""
         items = self._visible_items()
-        if not items:
+        if favorites:
+            items = [i for i in items if i.get("fav")]
+            if not items:
+                self.set_status("Keine Favoriten in der aktuellen Auswahl.", True)
+                return
+        pick = self._random_pick(items)
+        if not pick:
             self.set_status("Keine Wallpaper in der aktuellen Auswahl.", True)
             return
-        self.apply(random.choice(items))
+        self.apply(pick)
 
-    def rotate_now(self):
-        """Nächstes Wallpaper der aktuellen Auswahl – für den automatischen Wechsel."""
-        items = self._visible_items()
-        if not items:
+    def random_favorite(self):
+        self.random_wallpaper(favorites=True)
+
+    def rotate_favorite(self):
+        """Nächstes Favorit der Bibliothek (auch aus dem Tray)."""
+        favs = [i for i in self.cfg["items"] if i.get("fav")]
+        if not favs:
+            self.set_status("Es gibt noch keine Favoriten.", True)
             return
         idxs = self._target_indices()
         cur = self.cfg.get("assign", {}).get(str(idxs[0])) if idxs else None
+        ids = [i["id"] for i in favs]
+        self.apply(favs[(ids.index(cur) + 1) % len(favs)] if cur in ids else favs[0])
+
+    def apply_all(self, item):
+        """Doppelklick auf eine Karte: sofort auf alle Monitore anwenden."""
+        self.cfg["monitor"] = "all"
+        save_config(self.cfg)
+        self.apply(item)
+
+    def _playlist(self):
+        """Wallpaper für den automatischen Wechsel (optional nur Favoriten)."""
+        items = self._visible_items()
+        if self.cfg.get("fav_playlist"):
+            favs = [i for i in items if i.get("fav")]
+            if favs:
+                return favs
+        return items
+
+    def rotate_now(self):
+        """Nächstes Wallpaper der Playlist – für den automatischen Wechsel."""
+        items = self._playlist()
+        if not items:
+            return None
+        idxs = self._target_indices()
+        cur = self.cfg.get("assign", {}).get(str(idxs[0])) if idxs else None
         ids = [i["id"] for i in items]
-        self.apply(items[(ids.index(cur) + 1) % len(items)] if cur in ids else items[0])
+        item = items[(ids.index(cur) + 1) % len(items)] if cur in ids else items[0]
+        self.apply(item)
+        return item
 
     def _schedule_rotate(self):
         if self._rotate_job is not None:
@@ -2055,13 +2325,62 @@ class App(ctk.CTk):
         if minutes > 0 and not self._closing:
             self._rotate_job = self.after(minutes * 60 * 1000, self._rotate_tick)
 
+    def _quiet_now(self):
+        if not self.cfg.get("quiet_hours"):
+            return False
+        hour = time.localtime().tm_hour
+        return hour >= 22 or hour < 7
+
+    def _notify(self, text):
+        try:
+            if self.tray is not None:
+                self.tray.notify(text, APP_NAME)
+        except Exception:
+            pass
+
     def _rotate_tick(self):
         self._rotate_job = None
         if self._closing:
             return
-        if not fullscreen_app_active():  # nicht in Spiele / Vollbild-Apps hineinwechseln
-            self.rotate_now()
+        if not fullscreen_app_active() and not self._quiet_now():  # nicht in Spiele / Vollbild-Apps wechseln
+            item = self.rotate_now()
+            if item and self.cfg.get("notify_rotate"):
+                self._notify(f"Wechsel: {shorten(item['title'], 40)}")
         self._schedule_rotate()
+
+    # -- Tag/Nacht-Wallpaper
+    def _night_now(self):
+        hour = time.localtime().tm_hour
+        return hour >= 20 or hour < 7
+
+    def _night_check(self):
+        self._night_job = None
+        if self._closing:
+            return
+        night = self.find_item(self.cfg.get("night_id") or "")
+        want = bool(night) and self._night_now()
+        if not self.player.active:  # kein laufendes Wallpaper: nichts automatisch starten
+            self._night_job = self.after(5 * 60 * 1000, self._night_check)
+            return
+        if want and not self._night_on:
+            self._night_on = True
+            self._night_backup = dict(self.cfg.get("assign", {}))
+            a = dict(self.cfg["assign"])
+            for i in self._target_indices():
+                a[str(i)] = night["id"]
+            self.cfg["assign"] = a
+            save_config(self.cfg)
+            threading.Thread(target=lambda: (self.player.apply(self._assign_items()),
+                                             self.ui(self.refresh_library)), daemon=True).start()
+            self.set_status(f"Nacht-Wallpaper aktiv: {shorten(night['title'], 40)}")
+        elif not want and self._night_on:
+            self._night_on = False
+            self.cfg["assign"] = dict(self._night_backup or {})
+            save_config(self.cfg)
+            threading.Thread(target=lambda: (self.player.apply(self._assign_items()),
+                                             self.ui(self.refresh_library)), daemon=True).start()
+            self.set_status("Tag-Wallpaper wieder aktiv.")
+        self._night_job = self.after(5 * 60 * 1000, self._night_check)
 
     def on_rotate(self, label):
         self.cfg["rotate_min"] = ROTATE_MAP.get(label, 0)
@@ -2070,13 +2389,209 @@ class App(ctk.CTk):
         self.set_status(f"Automatischer Wechsel: {label}." if self.cfg["rotate_min"]
                         else "Automatischer Wechsel aus.")
 
+    def on_speed(self, label):
+        self.cfg["speed"] = SPEED_MAP.get(label, 1.0)
+        save_config(self.cfg)
+        self.restart_current()
+        self.set_status(f"Geschwindigkeit: {label}.")
+
+    def on_brightness(self, label):
+        self.cfg["brightness"] = BRIGHT_MAP.get(label, 100)
+        save_config(self.cfg)
+        self.restart_current()
+        self.set_status(f"Helligkeit: {label}.")
+
+    def on_flip(self):
+        self.cfg["flip"] = bool(self.sw_flip.get())
+        save_config(self.cfg)
+        self.restart_current()
+
+    def on_rotate180(self):
+        self.cfg["rotate180"] = bool(self.sw_rot180.get())
+        save_config(self.cfg)
+        self.restart_current()
+
+    def on_grayscale(self):
+        self.cfg["grayscale"] = bool(self.sw_gray.get())
+        save_config(self.cfg)
+        self.restart_current()
+
+    def on_night(self, label):
+        if label == "Aus":
+            self.cfg["night_id"] = ""
+        else:
+            self.cfg["night_id"] = next((i["id"] for i in self.cfg["items"]
+                                         if shorten(i["title"], 28) == label), "")
+        save_config(self.cfg)
+        self.set_status("Nacht-Wallpaper aus." if not self.cfg["night_id"]
+                        else f"Nacht-Wallpaper (20–7 Uhr): {label}")
+
+    def on_quiet(self):
+        self.cfg["quiet_hours"] = bool(self.sw_quiet.get())
+        save_config(self.cfg)
+
+    def on_battery_pause(self):
+        self.cfg["pause_battery"] = bool(self.sw_battery.get())
+        save_config(self.cfg)
+
+    def on_random_start(self):
+        self.cfg["random_start"] = bool(self.sw_random_start.get())
+        save_config(self.cfg)
+
+    def on_notify_rotate(self):
+        self.cfg["notify_rotate"] = bool(self.sw_notify.get())
+        save_config(self.cfg)
+
+    # -- Bibliothek: Statistik, Aufräumen, Export und Screenshot
+    def _update_stats(self):
+        label = getattr(self, "stats_lbl", None)
+        if label is None:
+            return
+        items = self.cfg["items"]
+        favs = sum(1 for i in items if i.get("fav"))
+        local = sum(1 for i in items if i["kind"] == "local")
+        size = 0
+        for i in items:
+            if i["kind"] == "local":
+                try:
+                    size += Path(i["src"]).stat().st_size
+                except OSError:
+                    pass
+        text = f"{len(items)} Wallpaper · {favs} Favoriten · {local} lokal · {size / (1024 ** 2):.1f} MB"
+        top = max(items, key=lambda i: int(i.get("plays", 0) or 0), default=None)
+        if top is not None and int(top.get("plays", 0) or 0) > 0:
+            text += f" · meistgesehen: {shorten(top['title'], 24)} ({int(top['plays'])}×)"
+        label.configure(text=text)
+
+    def export_library(self):
+        path = filedialog.asksaveasfilename(title="Bibliothek exportieren", defaultextension=".json",
+                                            initialfile="wallura-bibliothek.json",
+                                            filetypes=[("JSON", "*.json")])
+        if not path:
+            return
+        data = {"app": APP_NAME, "version": APP_VERSION, "items": self.cfg["items"]}
+        try:
+            Path(path).write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            self.set_status(f"Bibliothek exportiert: {Path(path).name}")
+        except Exception as e:
+            self.set_status(f"Export fehlgeschlagen: {e}", True)
+
+    def import_library(self):
+        path = filedialog.askopenfilename(title="Bibliothek importieren",
+                                          filetypes=[("JSON", "*.json"), ("Alle Dateien", "*.*")])
+        if not path:
+            return
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except Exception as e:
+            self.set_status(f"Datei nicht lesbar: {e}", True)
+            return
+        raw = data.get("items") if isinstance(data, dict) else data
+        known = {i["src"].strip().lower() for i in self.cfg["items"]}
+        added = 0
+        for entry in raw if isinstance(raw, list) else []:
+            item = _clean_item(entry)
+            if not item or item["src"].strip().lower() in known:
+                continue
+            item["id"] = uuid.uuid4().hex[:10]
+            item["plays"] = 0
+            item["added"] = time.time()
+            self.cfg["items"].append(item)
+            known.add(item["src"].strip().lower())
+            added += 1
+            if item["kind"] == "local":
+                threading.Thread(target=self._thumb_worker, args=(item,), daemon=True).start()
+        save_config(self.cfg)
+        self.refresh_library()
+        self.set_status(f"{added} Wallpaper importiert." if added else "Keine neuen Einträge in der Datei.")
+
+    def remove_duplicates(self):
+        seen, keep, dupes = set(), [], []
+        for item in self.cfg["items"]:
+            key = (item["kind"], item["src"].strip().lower())
+            if key in seen:
+                dupes.append(item)
+            else:
+                seen.add(key)
+                keep.append(item)
+        if not dupes:
+            self.set_status("Keine doppelten Einträge gefunden.")
+            return
+        ids = {i["id"] for i in dupes}
+        self.cfg["items"] = keep
+        self.cfg["assign"] = {k: v for k, v in self.cfg.get("assign", {}).items() if v not in ids}
+        save_config(self.cfg)
+        threading.Thread(target=lambda: (self.player.apply(self._assign_items()),
+                                         self.ui(self.refresh_library)), daemon=True).start()
+        self.set_status(f"{len(dupes)} doppelte Einträge entfernt.")
+
+    def clear_favorites(self):
+        count = sum(1 for i in self.cfg["items"] if i.get("fav"))
+        if not count:
+            self.set_status("Es gibt noch keine Favoriten.")
+            return
+        for item in self.cfg["items"]:
+            item["fav"] = False
+        save_config(self.cfg)
+        self.refresh_library()
+        self.set_status(f"{count} Favoriten entfernt.")
+
+    def rebuild_thumbs(self):
+        local_items = [i for i in self.cfg["items"] if i["kind"] == "local"]
+        if not local_items:
+            self.set_status("Keine lokalen Wallpaper für Vorschaubilder.", True)
+            return
+        self.set_status(f"Erzeuge {len(local_items)} Vorschaubilder neu …")
+
+        def work():
+            for item in local_items:
+                make_local_thumb(item["id"], item["src"])
+            self.ui(lambda: (self.refresh_library(), self.set_status("Vorschaubilder neu erzeugt.")))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def screenshot_now(self):
+        paths = self.player.screenshot(DATA_DIR / "screenshots")
+        if not paths:
+            self.set_status("Kein Wallpaper aktiv – Screenshot nicht möglich.", True)
+            return
+        self.set_status(f"Screenshot gespeichert: {paths[0].name}")
+        try:
+            os.startfile(str(paths[0].parent))
+        except Exception:
+            pass
+
+    def _hotkey(self, fn):
+        try:
+            widget = self.focus_get()
+        except Exception:
+            widget = None
+        if widget is not None and widget.winfo_class() in ("Entry", "TEntry", "Text"):
+            return
+        fn()
+
+    def _bind_shortcuts(self):
+        self.bind_all("<space>", lambda e: self._hotkey(self.toggle_pause))
+        self.bind_all("<Key-n>", lambda e: self._hotkey(self.next_wallpaper))
+        self.bind_all("<Key-r>", lambda e: self._hotkey(self.random_wallpaper))
+        self.bind_all("<Key-f>", lambda e: self._hotkey(self.favorite_current))
+
+    def favorite_current(self):
+        active = self._assign_items()
+        item = next((active[i] for i in self._target_indices() if i in active), None)
+        if item is None:
+            self.set_status("Kein Wallpaper aktiv.", True)
+            return
+        self.toggle_favorite(item)
+
     # -- Hinzufügen / Entfernen
     def add_local(self):
         pats = " ".join(f"*{e}" for e in MEDIA_EXT)
         files = filedialog.askopenfilenames(title="Wallpaper auswählen",
                                             filetypes=[("Videos & Bilder", pats), ("Alle Dateien", "*.*")])
         for f in files:
-            item = {"id": uuid.uuid4().hex[:10], "title": Path(f).stem, "kind": "local", "src": f}
+            item = {"id": uuid.uuid4().hex[:10], "title": Path(f).stem, "kind": "local", "src": f,
+                    "added": time.time(), "plays": 0}
             self.cfg["items"].append(item)
             threading.Thread(target=self._thumb_worker, args=(item,), daemon=True).start()
         if files:
@@ -2091,7 +2606,8 @@ class App(ctk.CTk):
         if not re.match(r"https?://", url, re.I):
             self.set_status("Das sieht nicht nach einem Link aus (https://…).", True)
             return
-        item = {"id": uuid.uuid4().hex[:10], "title": url, "kind": detect_kind(url), "src": url}
+        item = {"id": uuid.uuid4().hex[:10], "title": url, "kind": detect_kind(url), "src": url,
+                "added": time.time(), "plays": 0}
         self.cfg["items"].append(item)
         save_config(self.cfg)
         self.refresh_library()
@@ -2141,6 +2657,9 @@ class App(ctk.CTk):
         for i in idxs:  # nur übernehmen, was wirklich läuft
             if live.get(i) == item["id"]:
                 self.cfg["assign"][str(i)] = item["id"]
+        if ok:  # Wiedergabe-Statistik
+            item["plays"] = int(item.get("plays", 0) or 0) + 1
+            item["last_used"] = time.time()
         save_config(self.cfg)
         if ok:
             where = "" if len(idxs) != 1 or self._mon_count == 1 else f" (Monitor {idxs[0] + 1})"
@@ -2167,7 +2686,9 @@ class App(ctk.CTk):
             threading.Thread(target=lambda: self.player.apply(self._assign_items(), force=True), daemon=True).start()
 
     def next_wallpaper(self):
-        items = self.cfg["items"]
+        items = self._playlist()
+        if not items:
+            items = self.cfg["items"]
         if not items:
             return
         idxs = self._target_indices()
@@ -2696,6 +3217,7 @@ class App(ctk.CTk):
                              lambda: self.ui(self.install_update),
                              visible=lambda item: bool(self.update_file)),
             pystray.MenuItem("Nächstes Wallpaper", lambda: self.ui(self.next_wallpaper)),
+            pystray.MenuItem("★ Nächstes Favorit", lambda: self.ui(self.rotate_favorite)),
             pystray.MenuItem("🎲 Zufälliges Wallpaper", lambda: self.ui(self.random_wallpaper)),
             pystray.MenuItem("Wallpaper stoppen", lambda: self.ui(self.stop_wallpaper)),
             pystray.Menu.SEPARATOR,

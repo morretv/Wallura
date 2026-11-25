@@ -27,11 +27,20 @@ Optional: `ffmpeg` (`winget install Gyan.FFmpeg`) für Downloads in voller Quali
 - Lokale Dateien (mp4, webm, mkv, mov, gif, Bilder), Web-Links (direkte Videos oder alles, was yt-dlp kann), YouTube
 - ⬇ lädt Links in die Bibliothek, danach offline nutzbar
 - Lautstärke, Anpassung (Füllen / Einpassen / Strecken), Monitor-Auswahl, Max-Qualität
-- ★ Favoriten (Stern auf der Karte) und Filter „★ Favoriten“ in der Bibliothek
-- 🎲 Zufällig: ein zufälliges Wallpaper aus der aktuellen Auswahl (Suche/Filter)
-- Automatischer Wechsel alle 5 / 15 / 30 Minuten, jede Stunde oder alle 3 Stunden
-- Pausiert automatisch bei Vollbild-Apps (Spiele usw.)
-- Tray-Icon (Pause, Nächstes, Zufällig, Stoppen, Beenden), Autostart mit Windows
+- ★ Favoriten (Stern auf der Karte), Filter „★ Favoriten“ und ★🎲 Zufall nur aus Favoriten
+- 🎲 Zufall ohne direkte Wiederholung; Doppelklick auf eine Karte legt sie auf alle Monitore
+- Automatischer Wechsel alle 5 / 15 / 30 Minuten, jede Stunde oder alle 3 Stunden – optional nur mit Favoriten
+- Ruhezeiten: zwischen 22 und 7 Uhr wird nicht automatisch gewechselt
+- Tag/Nacht-Wallpaper: zwischen 20 und 7 Uhr läuft automatisch ein eigenes Video
+- Wiedergabe: Geschwindigkeit (0,5× bis 2×), Helligkeit, Spiegeln, 180°-Drehung, Schwarzweiß
+- Sortierung (Zuletzt / Titel A–Z / Meistgesehen / Favoriten zuerst) und Suche auch in der Quelle
+- Eigene Titel vergeben, Wiedergabe-Zähler auf der Karte und Statistik in den Einstellungen
+- Duplikate entfernen, Vorschaubilder neu erzeugen, alle Favoriten löschen
+- Bibliotheksliste als JSON exportieren und wieder importieren
+- Screenshot des laufenden Wallpapers als PNG
+- Zufällig beim Start, Pause im Akkubetrieb, Pause bei Vollbild-Apps (Spiele usw.)
+- Tray-Hinweis beim Wechsel, Tastaturkürzel: Leertaste = Pause, N = nächstes, R = zufällig, F = Favorit
+- Tray-Icon (Pause, Nächstes, Nächstes Favorit, Zufällig, Stoppen, Beenden), Autostart mit Windows
 - Nach einem mpv-Absturz startet das Wallpaper automatisch neu
 
 ## Pro Monitor ein eigenes Wallpaper
@@ -61,6 +70,12 @@ Im Ordner `android/` liegt die Android-App im gleichen Design: Videos importiere
 sortieren, zufällig wählen, Lautstärke und Anpassung einstellen und das Ganze als Live-Wallpaper setzen.
 Der automatische Wechsel (Aus / 5 / 15 / 30 / 60 Minuten) läuft auch auf dem Homescreen, wenn die App
 nicht geöffnet ist. Bei jedem Tag `v*` baut die CI die APK und hängt sie an das Release.
+
+Auch auf dem Handy gibt es Sortierung (Neu / A–Z / Meistgesehen / ★ zuerst), eigene Titel über langes
+Drücken, Wiedergabe-Zähler, Statistik, Duplikate entfernen, Favoriten-Playlist, Ruhezeiten, zufällige
+Reihenfolge, Wechsel-Hinweis, Geschwindigkeit, Zufällig beim Start, Pause im Energiesparmodus,
+ein separates Nacht-Video (20–7 Uhr), ein Sperrbildschirm-Standbild aus dem aktiven Video und den
+Export der Bibliotheksliste als JSON.
 
 ## Daten
 

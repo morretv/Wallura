@@ -61,4 +61,15 @@ final class Thumbs {
     static void remove(Context c, File video) {
         cacheFile(c, video).delete();
     }
+
+    /** Alle gespeicherten Vorschaubilder verwerfen – sie werden beim nächsten Anzeigen neu erzeugt. */
+    static void clear(Context c) {
+        File dir = new File(c.getCacheDir(), "thumbs");
+        File[] files = dir.listFiles();
+        if (files != null) {
+            for (File f : files) {
+                f.delete();
+            }
+        }
+    }
 }

@@ -5,6 +5,8 @@ import android.app.AlertDialog;
 import android.app.WallpaperManager;
 import android.content.ComponentName;
 import android.content.Intent;
+import android.graphics.Bitmap;
+import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.os.Bundle;
 import android.text.Editable;
@@ -17,10 +19,13 @@ import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Random;
@@ -29,6 +34,8 @@ import java.util.Random;
 public class MainActivity extends Activity {
 
     private static final int REQ_PICK = 1001;
+    private static final int REQ_EXPORT = 1002;
+    private static final int REQ_NIGHT = 1003;
 
     private TextView status;
     private TextView count;
@@ -36,6 +43,7 @@ public class MainActivity extends Activity {
     private LinearLayout list;
     private LinearLayout settings;
     private LinearLayout filterRow;
+    private LinearLayout sortRow;
     private TextView sideActive;
     private SeekBar volume;
     private TextView volumeLabel;
@@ -62,6 +70,8 @@ public class MainActivity extends Activity {
         search = findViewById(R.id.lib_search);
         list = findViewById(R.id.lib_list);
         filterRow = findViewById(R.id.lib_filter);
+        sortRow = findViewById(R.id.lib_sort);
+        favoritesOnly = Library.favoritesOnly(this);
         settings = findViewById(R.id.settings_container);
         sideActive = findViewById(R.id.side_active);
         volume = findViewById(R.id.volume);
@@ -132,9 +142,11 @@ public class MainActivity extends Activity {
         });
 
         buildFilters();
+        buildSort();
         buildSettings();
         showPage("library");
         refresh();
+        maybeRandomStart();
         setStatus(Library.videos(this).isEmpty()
                 ? "Noch keine Videos – tippe auf „＋ Datei“." : "Bereit.");
     }
@@ -173,10 +185,17 @@ public class MainActivity extends Activity {
             final boolean isActive = path.equals(activePath);
             View row = inflater.inflate(R.layout.item_video, list, false);
 
-            ((TextView) row.findViewById(R.id.video_name)).setText(file.getName());
+            ((TextView) row.findViewById(R.id.video_name)).setText(Library.displayName(this, file));
+            int plays = Library.plays(this, file);
             ((TextView) row.findViewById(R.id.video_meta)).setText(
                     String.format(Locale.GERMANY, "%.1f MB", file.length() / (1024.0 * 1024.0))
+                            + (plays > 0 ? "  ·  " + plays + "×" : "")
                             + (isActive ? "  ·  aktiv" : ""));
+            row.setOnLongClickListener(v -> {
+                fileMenu(file);
+                return true;
+            });
+            row.findViewById(R.id.video_edit).setOnClickListener(v -> rename(file));
             Thumbs.load(this, file, (ImageView) row.findViewById(R.id.video_thumb));
 
             final boolean favorite = Library.isFavorite(this, file);
@@ -227,6 +246,7 @@ public class MainActivity extends Activity {
         TextView all = Ui.pill(this, "Alle", favoritesOnly ? Ui.CHIP_OFF : Ui.CHIP_ON);
         all.setOnClickListener(v -> {
             favoritesOnly = false;
+            Library.setFavoritesOnly(this, false);
             buildFilters();
             refresh();
         });
@@ -235,6 +255,7 @@ public class MainActivity extends Activity {
         TextView favs = Ui.pill(this, "★ Favoriten", favoritesOnly ? Ui.CHIP_ON : Ui.CHIP_OFF);
         favs.setOnClickListener(v -> {
             favoritesOnly = true;
+            Library.setFavoritesOnly(this, true);
             buildFilters();
             refresh();
         });
@@ -246,24 +267,117 @@ public class MainActivity extends Activity {
         View spacer = new View(this);
         filterRow.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1f));
 
+        TextView randomFav = Ui.pill(this, "★🎲", Ui.SECONDARY);
+        randomFav.setOnClickListener(v -> randomFavorite());
+        LinearLayout.LayoutParams randomFavParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        randomFavParams.rightMargin = Ui.dp(this, 5);
+        filterRow.addView(randomFav, randomFavParams);
+
         TextView shuffle = Ui.pill(this, "🎲 Zufällig", Ui.SECONDARY);
         shuffle.setOnClickListener(v -> randomWallpaper());
         filterRow.addView(shuffle);
     }
 
-    private void randomWallpaper() {
-        List<File> videos = Library.videos(this, search.getText().toString(), favoritesOnly);
-        if (videos.isEmpty()) {
-            setStatus("Keine Wallpaper in der aktuellen Auswahl.", true);
-            return;
+    /** Sortier-Chips über der Liste (Neu / A–Z / Meistgesehen / Favoriten zuerst). */
+    private void buildSort() {
+        sortRow.removeAllViews();
+        String[][] modes = {{"Neu", Library.SORT_NEW}, {"A–Z", Library.SORT_AZ},
+                {"Meistgesehen", Library.SORT_PLAYS}, {"★ zuerst", Library.SORT_FAV}};
+        String current = Library.sortMode(this);
+        for (int i = 0; i < modes.length; i++) {
+            final String value = modes[i][1];
+            TextView chip = Ui.pill(this, modes[i][0], value.equals(current) ? Ui.CHIP_ON : Ui.CHIP_OFF);
+            chip.setOnClickListener(v -> {
+                Library.setSortMode(this, value);
+                buildSort();
+                refresh();
+            });
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            if (i > 0) {
+                params.leftMargin = Ui.dp(this, 4);
+            }
+            sortRow.addView(chip, params);
         }
-        File pick = videos.get(new Random().nextInt(videos.size()));
+    }
+
+    /** Spielt ein Video ab und aktualisiert die Oberfläche. */
+    private void playPick(File pick, String prefix) {
         Library.setActive(this, pick.getAbsolutePath());
         paused = false;
         btnPause.setText("Pause");
         sendCommand(VideoWallpaperService.CMD_RELOAD);
         refresh();
-        setStatus("Zufällig gewählt: " + pick.getName());
+        setStatus(prefix + Library.displayName(this, pick));
+    }
+
+    private void randomWallpaper() {
+        List<File> videos = Library.videos(this, search.getText().toString(), favoritesOnly);
+        if (Library.favPlaylist(this)) {
+            List<File> favs = new ArrayList<>();
+            for (File f : videos) {
+                if (Library.isFavorite(this, f)) {
+                    favs.add(f);
+                }
+            }
+            if (!favs.isEmpty()) {
+                videos = favs;
+            }
+        }
+        if (videos.isEmpty()) {
+            setStatus("Keine Wallpaper in der aktuellen Auswahl.", true);
+            return;
+        }
+        File active = Library.activeFile(this);
+        List<File> pool = new ArrayList<>();
+        for (File f : videos) {
+            if (active == null || !f.getAbsolutePath().equals(active.getAbsolutePath())) {
+                pool.add(f);
+            }
+        }
+        if (pool.isEmpty()) {
+            pool = videos;
+        }
+        playPick(pool.get(new Random().nextInt(pool.size())), "Zufällig gewählt: ");
+    }
+
+    /** Zufällig ein Favorit – ohne den gerade laufenden zu wiederholen. */
+    private void randomFavorite() {
+        List<File> favs = new ArrayList<>();
+        for (File f : Library.videos(this, search.getText().toString(), favoritesOnly)) {
+            if (Library.isFavorite(this, f)) {
+                favs.add(f);
+            }
+        }
+        if (favs.isEmpty()) {
+            setStatus("Keine Favoriten in der Auswahl.", true);
+            return;
+        }
+        File active = Library.activeFile(this);
+        File pick = favs.get(new Random().nextInt(favs.size()));
+        if (favs.size() > 1 && active != null) {
+            for (int i = 0; i < 8 && pick.getAbsolutePath().equals(active.getAbsolutePath()); i++) {
+                pick = favs.get(new Random().nextInt(favs.size()));
+            }
+        }
+        playPick(pick, "Favorit: ");
+    }
+
+    /** "Zufällig beim Start": beim Öffnen der App ein zufälliges Wallpaper wählen. */
+    private void maybeRandomStart() {
+        if (!Library.randomStart(this)) {
+            return;
+        }
+        List<File> videos = Library.videos(this);
+        if (videos.isEmpty()) {
+            return;
+        }
+        File pick = videos.get(new Random().nextInt(videos.size()));
+        Library.setActive(this, pick.getAbsolutePath());
+        sendCommand(VideoWallpaperService.CMD_RELOAD);
+        refresh();
+        setStatus("Zufällig beim Start: " + Library.displayName(this, pick));
     }
 
     @Override
@@ -290,6 +404,19 @@ public class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQ_PICK && resultCode == RESULT_OK && data != null && data.getData() != null) {
             importVideo(data.getData());
+        }
+        if (requestCode == REQ_EXPORT && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            try (OutputStream out = getContentResolver().openOutputStream(data.getData())) {
+                if (out != null) {
+                    out.write(Library.exportJson(this).getBytes("UTF-8"));
+                }
+                setStatus("Bibliotheksliste exportiert.");
+            } catch (Exception e) {
+                setStatus("Export fehlgeschlagen: " + e.getMessage(), true);
+            }
+        }
+        if (requestCode == REQ_NIGHT && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            importNight(data.getData());
         }
     }
 
@@ -325,7 +452,18 @@ public class MainActivity extends Activity {
     }
 
     private void nextWallpaper() {
-        List<File> videos = Library.videos(this);
+        List<File> videos = Library.videos(this, search.getText().toString(), favoritesOnly);
+        if (Library.favPlaylist(this)) {
+            List<File> favs = new ArrayList<>();
+            for (File f : videos) {
+                if (Library.isFavorite(this, f)) {
+                    favs.add(f);
+                }
+            }
+            if (!favs.isEmpty()) {
+                videos = favs;
+            }
+        }
         if (videos.isEmpty()) {
             setStatus("Erst ein Video hinzufügen.");
             return;
@@ -340,13 +478,7 @@ public class MainActivity extends Activity {
                 }
             }
         }
-        File next = videos.get(index);
-        Library.setActive(this, next.getAbsolutePath());
-        paused = false;
-        btnPause.setText("Pause");
-        sendCommand(VideoWallpaperService.CMD_RELOAD);
-        refresh();
-        setStatus("Wallpaper läuft: " + next.getName());
+        playPick(videos.get(index), "Wallpaper läuft: ");
     }
 
     private void setAsWallpaper() {
@@ -434,6 +566,33 @@ public class MainActivity extends Activity {
         rotParams.bottomMargin = Ui.dp(this, 6);
         play.addView(rotChips, rotParams);
 
+        Ui.block(this, play, "Geschwindigkeit", "Wiedergabe schneller oder langsamer.");
+        LinearLayout speedRow = new LinearLayout(this);
+        speedRow.setOrientation(LinearLayout.HORIZONTAL);
+        float[] speeds = {1f, 1.25f, 1.5f, 2f};
+        String[] speedLabels = {"1×", "1,25×", "1,5×", "2×"};
+        for (int i = 0; i < speeds.length; i++) {
+            final float value = speeds[i];
+            TextView chip = Ui.pill(this, speedLabels[i],
+                    Math.abs(Library.speed(this) - value) < 0.01f ? Ui.CHIP_ON : Ui.CHIP_OFF);
+            chip.setOnClickListener(v -> {
+                Library.setSpeed(this, value);
+                sendCommand(VideoWallpaperService.CMD_RELOAD);
+                buildSettings();
+                setStatus("Geschwindigkeit: " + value + "×");
+            });
+            LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            if (i > 0) {
+                chipParams.leftMargin = Ui.dp(this, 5);
+            }
+            speedRow.addView(chip, chipParams);
+        }
+        LinearLayout.LayoutParams speedParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        speedParams.bottomMargin = Ui.dp(this, 6);
+        play.addView(speedRow, speedParams);
+
         Ui.block(this, play, "Lautstärke", "Ton des Wallpapers – 0 % ist stumm (unten in der Leiste).");
 
         LinearLayout wall = Ui.section(this, settings, "Wallpaper");
@@ -456,6 +615,120 @@ public class MainActivity extends Activity {
         TextView clear = Ui.pill(this, "Alle löschen", Ui.DANGER);
         clear.setOnClickListener(v -> confirmDeleteAll());
         storageRow.addView(clear);
+
+        LinearLayout change = Ui.section(this, settings, "Wechsel");
+        LinearLayout changeRow = new LinearLayout(this);
+        changeRow.setOrientation(LinearLayout.HORIZONTAL);
+        toggleChip(changeRow, "Nur Favoriten", Library.favPlaylist(this),
+                () -> Library.setFavPlaylist(this, !Library.favPlaylist(this)));
+        toggleChip(changeRow, "Ruhezeiten 22–7", Library.quietHours(this),
+                () -> Library.setQuietHours(this, !Library.quietHours(this)));
+        change.addView(changeRow, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        LinearLayout changeRow2 = new LinearLayout(this);
+        changeRow2.setOrientation(LinearLayout.HORIZONTAL);
+        toggleChip(changeRow2, "Zufällige Reihenfolge", Library.shuffle(this),
+                () -> Library.setShuffle(this, !Library.shuffle(this)));
+        toggleChip(changeRow2, "Hinweis", Library.notifyRotate(this),
+                () -> Library.setNotifyRotate(this, !Library.notifyRotate(this)));
+        LinearLayout.LayoutParams changeParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        changeParams.topMargin = Ui.dp(this, 4);
+        change.addView(changeRow2, changeParams);
+        Ui.block(this, change, "Ruhezeiten und Reihenfolge",
+                "Nachts pausieren, nur Favoriten wechseln oder zufällig mischen.");
+
+        LinearLayout power = Ui.section(this, settings, "Akku & Start");
+        LinearLayout powerRow = new LinearLayout(this);
+        powerRow.setOrientation(LinearLayout.HORIZONTAL);
+        toggleChip(powerRow, "Bei Energiesparen pausieren", Library.pauseBattery(this),
+                () -> Library.setPauseBattery(this, !Library.pauseBattery(this)));
+        toggleChip(powerRow, "Zufällig beim Start", Library.randomStart(this),
+                () -> Library.setRandomStart(this, !Library.randomStart(this)));
+        power.addView(powerRow, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        Ui.block(this, power, "Energiesparmodus",
+                "Pausiert das Wallpaper, sobald Android Strom spart.");
+
+        LinearLayout libBox = Ui.section(this, settings, "Bibliothek");
+        LinearLayout statsRow = Ui.block(this, libBox, "Statistik", statsText());
+        TextView reset = Ui.pill(this, "Zurücksetzen", Ui.GHOST);
+        reset.setOnClickListener(v -> {
+            Library.resetStats(this);
+            buildSettings();
+            refresh();
+            setStatus("Wiedergabe-Statistik zurückgesetzt.");
+        });
+        statsRow.addView(reset);
+        LinearLayout cleanRow = Ui.block(this, libBox, "Aufräumen",
+                "Doppelte Videos, Favoriten und Vorschaubilder.");
+        LinearLayout cleanBtns = new LinearLayout(this);
+        cleanBtns.setOrientation(LinearLayout.HORIZONTAL);
+        TextView dupes = Ui.pill(this, "Duplikate", Ui.SECONDARY);
+        dupes.setOnClickListener(v -> {
+            int removed = Library.removeDuplicates(this);
+            refresh();
+            buildSettings();
+            setStatus(removed == 0 ? "Keine doppelten Videos gefunden."
+                    : removed + " doppelte Videos entfernt.");
+        });
+        cleanBtns.addView(dupes);
+        TextView clearFavs = Ui.pill(this, "Favoriten", Ui.GHOST);
+        clearFavs.setOnClickListener(v -> {
+            int count = Library.clearFavorites(this);
+            refresh();
+            buildSettings();
+            setStatus(count == 0 ? "Keine Favoriten vorhanden."
+                    : count + " Favoriten entfernt.");
+        });
+        LinearLayout.LayoutParams btnGap = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        btnGap.leftMargin = Ui.dp(this, 5);
+        cleanBtns.addView(clearFavs, btnGap);
+        TextView thumbsBtn = Ui.pill(this, "Vorschauen", Ui.GHOST);
+        thumbsBtn.setOnClickListener(v -> {
+            Thumbs.clear(this);
+            refresh();
+            setStatus("Vorschaubilder werden neu erzeugt.");
+        });
+        LinearLayout.LayoutParams thumbsGap = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        thumbsGap.leftMargin = Ui.dp(this, 5);
+        cleanBtns.addView(thumbsBtn, thumbsGap);
+        cleanRow.addView(cleanBtns);
+        LinearLayout exportRow = Ui.block(this, libBox, "Export",
+                "Bibliotheksliste als JSON sichern (ohne Videodateien).");
+        TextView export = Ui.pill(this, "Exportieren", Ui.SECONDARY);
+        export.setOnClickListener(v -> exportLibrary());
+        exportRow.addView(export);
+
+        LinearLayout night = Ui.section(this, settings, "Tag/Nacht");
+        LinearLayout nightRow = Ui.block(this, night, "Nacht-Wallpaper",
+                "Zwischen 20 und 7 Uhr läuft automatisch ein eigenes Video.");
+        TextView chooseNight = Ui.pill(this, Library.nightVideo(this) == null ? "Wählen" : "Ändern",
+                Ui.SECONDARY);
+        chooseNight.setOnClickListener(v -> pickNight());
+        nightRow.addView(chooseNight);
+        if (Library.nightVideo(this) != null) {
+            TextView removeNight = Ui.pill(this, "Entfernen", Ui.GHOST);
+            removeNight.setOnClickListener(v -> {
+                Library.clearNightVideo(this);
+                buildSettings();
+                sendCommand(VideoWallpaperService.CMD_RELOAD);
+                setStatus("Nacht-Wallpaper entfernt.");
+            });
+            LinearLayout.LayoutParams removeParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            removeParams.leftMargin = Ui.dp(this, 5);
+            nightRow.addView(removeNight, removeParams);
+        }
+
+        LinearLayout lock = Ui.section(this, settings, "Sperrbildschirm");
+        LinearLayout lockRow = Ui.block(this, lock, "Standbild setzen",
+                "Aktuelles Video als Bild auf dem Sperrbildschirm.");
+        TextView lockBtn = Ui.pill(this, "Setzen", Ui.PRIMARY);
+        lockBtn.setOnClickListener(v -> setLockscreen());
+        lockRow.addView(lockBtn);
 
         LinearLayout about = Ui.section(this, settings, "Über");
         Ui.block(this, about, "Wallura " + version,
@@ -518,6 +791,167 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             setStatus("Link ließ sich nicht öffnen: " + e.getMessage(), true);
         }
+    }
+
+    // ---------------------------------------------------------------- Neue Funktionen
+
+    /** Sortier-/Umschalt-Chip für die Einstellungen. */
+    private void toggleChip(LinearLayout row, String label, boolean on, Runnable action) {
+        TextView chip = Ui.pill(this, label, on ? Ui.CHIP_ON : Ui.CHIP_OFF);
+        chip.setOnClickListener(v -> {
+            action.run();
+            buildSettings();
+            refresh();
+        });
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        params.leftMargin = Ui.dp(this, 4);
+        row.addView(chip, params);
+    }
+
+    /** Langes Drücken auf eine Karte: umbenennen oder Favorit umschalten. */
+    private void fileMenu(final File file) {
+        new AlertDialog.Builder(this)
+                .setTitle(Library.displayName(this, file))
+                .setItems(new String[]{"Umbenennen", "Favorit umschalten"}, (dialog, which) -> {
+                    if (which == 0) {
+                        rename(file);
+                    } else {
+                        boolean now = Library.toggleFavorite(this, file);
+                        refresh();
+                        setStatus(now ? "Zu Favoriten hinzugefügt." : "Aus Favoriten entfernt.");
+                    }
+                })
+                .show();
+    }
+
+    /** Eigener Titel für ein Video (wird in Suche und Liste verwendet). */
+    private void rename(final File file) {
+        final EditText input = new EditText(this);
+        input.setText(Library.displayName(this, file));
+        input.setSelection(input.getText().length());
+        new AlertDialog.Builder(this)
+                .setTitle("Titel ändern")
+                .setView(input)
+                .setNegativeButton("Abbrechen", null)
+                .setPositiveButton("Speichern", (dialog, which) -> {
+                    Library.setTitle(this, file, input.getText().toString());
+                    refresh();
+                    setStatus("Titel geändert.");
+                })
+                .show();
+    }
+
+    private String statsText() {
+        int total = Library.videos(this).size();
+        int favs = Library.favorites(this).size();
+        float mb = Library.totalBytes(this) / (1024f * 1024f);
+        String text = total + " Videos · " + favs + " Favoriten · "
+                + String.format(Locale.GERMANY, "%.1f MB", mb) + " · "
+                + Library.totalPlays(this) + " Wiedergaben";
+        String top = Library.topPlayed(this);
+        if (top != null) {
+            text += " · meistgesehen: " + top;
+        }
+        return text;
+    }
+
+    private void exportLibrary() {
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/json");
+        intent.putExtra(Intent.EXTRA_TITLE, "wallura-bibliothek.json");
+        try {
+            startActivityForResult(intent, REQ_EXPORT);
+        } catch (Exception e) {
+            setStatus("Export nicht möglich: " + e.getMessage(), true);
+        }
+    }
+
+    private void pickNight() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("video/*");
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        try {
+            startActivityForResult(intent, REQ_NIGHT);
+        } catch (Exception e) {
+            setStatus("Keine App zum Auswählen gefunden: " + e.getMessage(), true);
+        }
+    }
+
+    /** Kopiert das gewählte Nacht-Video in den App-Ordner. */
+    private void importNight(final Uri uri) {
+        setStatus("Nacht-Wallpaper wird übernommen …");
+        new Thread(() -> {
+            File dir = Library.nightDir(this);
+            File[] old = dir.listFiles();
+            if (old != null) {
+                for (File f : old) {
+                    f.delete();
+                }
+            }
+            final File dest = new File(dir, "night.mp4");
+            try (InputStream in = getContentResolver().openInputStream(uri);
+                 OutputStream out = new FileOutputStream(dest)) {
+                if (in == null) {
+                    throw new IllegalStateException("Quelle nicht lesbar");
+                }
+                byte[] buffer = new byte[1 << 16];
+                int read;
+                while ((read = in.read(buffer)) > 0) {
+                    out.write(buffer, 0, read);
+                }
+            } catch (Exception e) {
+                dest.delete();
+                runOnUiThread(() -> setStatus("Nacht-Wallpaper fehlgeschlagen: " + e.getMessage(), true));
+                return;
+            }
+            Library.setNightVideo(this, dest.getAbsolutePath());
+            runOnUiThread(() -> {
+                buildSettings();
+                sendCommand(VideoWallpaperService.CMD_RELOAD);
+                setStatus("Nacht-Wallpaper gesetzt (20–7 Uhr).");
+            });
+        }).start();
+    }
+
+    /** Standbild des aktiven Videos als Sperrbildschirm setzen. */
+    private void setLockscreen() {
+        final File active = Library.activeFile(this);
+        if (active == null) {
+            setStatus("Erst ein Video hinzufügen.", true);
+            return;
+        }
+        setStatus("Erstelle Bild für den Sperrbildschirm …");
+        new Thread(() -> {
+            Bitmap frame = null;
+            MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+            try {
+                retriever.setDataSource(active.getAbsolutePath());
+                frame = retriever.getFrameAtTime(1000000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+            } catch (Exception ignored) {
+            } finally {
+                try {
+                    retriever.release();
+                } catch (Exception ignored) {
+                }
+            }
+            if (frame == null) {
+                runOnUiThread(() -> setStatus("Kein Bild im Video gefunden.", true));
+                return;
+            }
+            try {
+                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                frame.compress(Bitmap.CompressFormat.JPEG, 90, buffer);
+                try (InputStream in = new ByteArrayInputStream(buffer.toByteArray())) {
+                    WallpaperManager.getInstance(this).setStream(in, null, true, WallpaperManager.FLAG_LOCK);
+                }
+                runOnUiThread(() -> setStatus("Sperrbildschirm gesetzt."));
+            } catch (Exception e) {
+                runOnUiThread(() -> setStatus("Sperrbildschirm fehlgeschlagen: " + e.getMessage(), true));
+            }
+        }).start();
     }
 
     // ---------------------------------------------------------------- Hilfen

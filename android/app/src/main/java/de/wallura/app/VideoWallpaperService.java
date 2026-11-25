@@ -8,13 +8,17 @@ import android.media.MediaPlayer;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.service.wallpaper.WallpaperService;
 import android.view.SurfaceHolder;
+import android.widget.Toast;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 
-/** Spielt das gewählte Video als Live-Wallpaper – Anpassung und Lautstärke wie am PC. */
+/** Spielt das gewählte Video als Live-Wallpaper – Anpassung, Tempo und Wechsel wie am PC. */
 public class VideoWallpaperService extends WallpaperService {
 
     static final String ACTION_COMMAND = "de.wallura.app.COMMAND";
@@ -33,11 +37,15 @@ public class VideoWallpaperService extends WallpaperService {
 
     private class VideoEngine extends Engine {
 
+        private final Context ctx = VideoWallpaperService.this;
+
         private MediaPlayer player;
         private SurfaceHolder holder;
         private String shownPath;
         private int shownVolume = -1;
         private String shownFit;
+        private float shownSpeed = -1f;
+        private String lastMarked;
         private boolean paused;
         private boolean stopped;
         private boolean listening;
@@ -48,39 +56,83 @@ public class VideoWallpaperService extends WallpaperService {
         private final Runnable rotate = new Runnable() {
             @Override
             public void run() {
-                int minutes = Library.rotateMinutes(VideoWallpaperService.this);
+                int minutes = Library.rotateMinutes(ctx);
                 if (minutes <= 0 || stopped) {
                     return;
                 }
-                if (!paused && holder != null) {
-                    List<File> videos = Library.videos(VideoWallpaperService.this);
-                    if (videos.size() > 1) {
-                        File active = Library.activeFile(VideoWallpaperService.this);
-                        String activePath = active == null ? null : active.getAbsolutePath();
-                        int next = 0;
-                        for (int i = 0; i < videos.size(); i++) {
-                            if (videos.get(i).getAbsolutePath().equals(activePath)) {
-                                next = (i + 1) % videos.size();
-                                break;
-                            }
-                        }
-                        Library.setActive(VideoWallpaperService.this, videos.get(next).getAbsolutePath());
+                if (!paused && holder != null && !Library.nightActive(ctx) && !Library.isQuietNow(ctx)) {
+                    File next = nextVideo();
+                    if (next != null) {
+                        Library.setActive(ctx, next.getAbsolutePath());
                         stop();
                         start();
+                        if (Library.notifyRotate(ctx)) {
+                            Toast.makeText(ctx, "Wallpaper gewechselt: " + Library.displayName(ctx, next),
+                                    Toast.LENGTH_SHORT).show();
+                        }
                     }
                 }
                 rotateHandler.postDelayed(this, minutes * 60_000L);
             }
         };
 
+        /** Im Energiesparmodus pausieren, sobald die Option aktiv ist. */
+        private final Runnable powerCheck = new Runnable() {
+            @Override
+            public void run() {
+                if (Library.pauseBattery(ctx)) {
+                    if (isPowerSave() && player != null) {
+                        stop();
+                    } else if (!isPowerSave() && player == null && !paused && !stopped) {
+                        start();
+                    }
+                }
+                rotateHandler.postDelayed(this, 30_000L);
+            }
+        };
+
+        private File nextVideo() {
+            List<File> videos = Library.rotationList(ctx);
+            if (videos.size() < 2) {
+                return null;
+            }
+            File active = Library.activeFile(ctx);
+            String activePath = active == null ? null : active.getAbsolutePath();
+            if (Library.shuffle(ctx)) {
+                List<File> pool = new ArrayList<>();
+                for (File f : videos) {
+                    if (!f.getAbsolutePath().equals(activePath)) {
+                        pool.add(f);
+                    }
+                }
+                return pool.isEmpty() ? null : pool.get(new Random().nextInt(pool.size()));
+            }
+            for (int i = 0; i < videos.size(); i++) {
+                if (videos.get(i).getAbsolutePath().equals(activePath)) {
+                    return videos.get((i + 1) % videos.size());
+                }
+            }
+            return videos.get(0);
+        }
+
         private void scheduleRotation() {
             rotateHandler.removeCallbacks(rotate);
             if (stopped || paused) {
                 return;
             }
-            int minutes = Library.rotateMinutes(VideoWallpaperService.this);
+            int minutes = Library.rotateMinutes(ctx);
             if (minutes > 0) {
                 rotateHandler.postDelayed(rotate, minutes * 60_000L);
+            }
+        }
+
+        private boolean isPowerSave() {
+            try {
+                PowerManager pm = (PowerManager) VideoWallpaperService.this
+                        .getSystemService(Context.POWER_SERVICE);
+                return pm != null && pm.isPowerSaveMode();
+            } catch (Exception e) {
+                return false;
             }
         }
 
@@ -92,7 +144,8 @@ public class VideoWallpaperService extends WallpaperService {
                     cmd = CMD_RELOAD;
                 }
                 switch (cmd) {
-                    case CMD_PAUSE:                        paused = true;
+                    case CMD_PAUSE:
+                        paused = true;
                         if (player != null) {
                             try {
                                 player.pause();
@@ -140,11 +193,13 @@ public class VideoWallpaperService extends WallpaperService {
             } catch (Exception ignored) {
                 listening = false;
             }
+            rotateHandler.postDelayed(powerCheck, 30_000L);
         }
 
         @Override
         public void onDestroy() {
             rotateHandler.removeCallbacks(rotate);
+            rotateHandler.removeCallbacks(powerCheck);
             if (listening) {
                 try {
                     VideoWallpaperService.this.unregisterReceiver(commands);
@@ -162,6 +217,8 @@ public class VideoWallpaperService extends WallpaperService {
             holder = surfaceHolder;
             start();
             scheduleRotation();
+            rotateHandler.removeCallbacks(powerCheck);
+            rotateHandler.postDelayed(powerCheck, 30_000L);
         }
 
         @Override
@@ -177,9 +234,12 @@ public class VideoWallpaperService extends WallpaperService {
             if (visible) {
                 start();
                 scheduleRotation();
+                rotateHandler.removeCallbacks(powerCheck);
+                rotateHandler.postDelayed(powerCheck, 30_000L);
             } else {
                 stop();
                 rotateHandler.removeCallbacks(rotate);
+                rotateHandler.removeCallbacks(powerCheck);
             }
         }
 
@@ -187,7 +247,7 @@ public class VideoWallpaperService extends WallpaperService {
             if (player == null) {
                 return;
             }
-            int volume = Library.volume(VideoWallpaperService.this);
+            int volume = Library.volume(ctx);
             float value = volume / 100f;
             try {
                 player.setVolume(value, value);
@@ -196,8 +256,23 @@ public class VideoWallpaperService extends WallpaperService {
             }
         }
 
+        private void applySpeed(MediaPlayer mp) {
+            if (mp == null) {
+                return;
+            }
+            try {
+                mp.setPlaybackParams(new android.media.PlaybackParams().setSpeed(Library.speed(ctx)));
+                shownSpeed = Library.speed(ctx);
+            } catch (Exception ignored) {
+            }
+        }
+
+        /** Nacht-Wallpaper zwischen 20 und 7 Uhr, sonst das aktive Video. */
         private String pickPath() {
-            File active = Library.activeFile(VideoWallpaperService.this);
+            if (Library.nightActive(ctx)) {
+                return Library.nightVideo(ctx);
+            }
+            File active = Library.activeFile(ctx);
             return active == null ? null : active.getAbsolutePath();
         }
 
@@ -208,18 +283,24 @@ public class VideoWallpaperService extends WallpaperService {
             if (holder == null || !holder.getSurface().isValid()) {
                 return;
             }
+            if (Library.pauseBattery(ctx) && isPowerSave()) {
+                stop();
+                return;
+            }
             String path = pickPath();
             if (path == null) {
                 stop();
                 return;
             }
-            int volume = Library.volume(VideoWallpaperService.this);
-            String fit = Library.fit(VideoWallpaperService.this);
+            int volume = Library.volume(ctx);
+            String fit = Library.fit(ctx);
+            float speed = Library.speed(ctx);
             if (player != null && path.equals(shownPath) && volume == shownVolume
-                    && fit.equals(shownFit)) {
+                    && fit.equals(shownFit) && speed == shownSpeed) {
                 try {
                     if (!player.isPlaying()) {
                         player.start();
+                        applySpeed(player);
                     }
                 } catch (Exception ignored) {
                 }
@@ -235,13 +316,14 @@ public class VideoWallpaperService extends WallpaperService {
                 mp.setVolume(value, value);
                 mp.setOnPreparedListener(p -> {
                     try {
-                        String mode = Library.fit(VideoWallpaperService.this);
+                        String mode = Library.fit(ctx);
                         if (Library.FIT_CONTAIN.equals(mode)) {
                             p.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT);
                         } else if (Library.FIT_COVER.equals(mode)) {
                             p.setVideoScalingMode(
                                     MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING);
                         }
+                        applySpeed(p);
                         if (!paused && !stopped) {
                             p.start();
                         }
@@ -257,6 +339,11 @@ public class VideoWallpaperService extends WallpaperService {
                 shownPath = path;
                 shownVolume = volume;
                 shownFit = fit;
+                shownSpeed = speed;
+                if (!path.equals(lastMarked)) {
+                    lastMarked = path;
+                    Library.markPlayed(ctx, path);
+                }
             } catch (Exception e) {
                 stop();
             }
@@ -268,6 +355,7 @@ public class VideoWallpaperService extends WallpaperService {
             shownPath = null;
             shownVolume = -1;
             shownFit = null;
+            shownSpeed = -1f;
             if (mp != null) {
                 try {
                     mp.setSurface(null);
