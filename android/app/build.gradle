@@ -10,8 +10,8 @@ android {
         applicationId 'de.wallura.app'
         minSdk 24
         targetSdk 34
-        versionCode 10800
-        versionName '1.8.0'
+        versionCode 10900
+        versionName '1.9.0'
     }
 
     // Fester Signaturschlüssel im Projekt: jede APK hat dieselbe Signatur.

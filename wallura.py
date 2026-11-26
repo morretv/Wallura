@@ -47,7 +47,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageTk
 # ----------------------------------------------------------------------------- Pfade
 APP_NAME = "Wallura"
 COPYRIGHT = "© 2026 MorreTv. Open Source (MIT)"
-APP_VERSION = "1.8.0"   # wird vom Build / GitHub-Workflow aus dem Release-Tag gesetzt
+APP_VERSION = "1.9.0"   # wird vom Build / GitHub-Workflow aus dem Release-Tag gesetzt
 # GitHub-Repo für automatische Updates ("benutzername/repo"). Dort muss pro Version ein Release
 # mit der Datei Wallura-Setup.exe liegen (Repo bzw. Releases müssen öffentlich sein).
 GITHUB_REPO = "MorreTv/Wallura"
@@ -142,6 +142,24 @@ DESK_COLORS = {"Weiß": "FFFFFF", "Anthrazit": "16181D", "Akzent": "FFC24C",
                "Gold": "3FBFF5", "Mint": "C0F07E", "Rosé": "AE6FFF"}
 DESK_COLOR_RGB = {"Weiß": (255, 255, 255), "Anthrazit": (22, 24, 29), "Akzent": (76, 194, 255),
                   "Gold": (245, 191, 63), "Mint": (126, 240, 192), "Rosé": (255, 111, 174)}
+# Schriftarten für Uhr, Datum und Text: (normale Datei, fette Datei, Name im Live-Overlay)
+DESK_FONTS = {
+    "Segoe UI": ("segoeui.ttf", "segoeuib.ttf", "Segoe UI"),
+    "Segoe UI Semibold": ("seguisb.ttf", "seguisb.ttf", "Segoe UI Semibold"),
+    "Segoe UI Light": ("seguil.ttf", "seguisb.ttf", "Segoe UI Light"),
+    "Arial": ("arial.ttf", "arialbd.ttf", "Arial"),
+    "Arial Black": ("ariblk.ttf", "ariblk.ttf", "Arial Black"),
+    "Verdana": ("verdana.ttf", "verdanab.ttf", "Verdana"),
+    "Tahoma": ("tahoma.ttf", "tahomabd.ttf", "Tahoma"),
+    "Trebuchet MS": ("trebuc.ttf", "trebucbd.ttf", "Trebuchet MS"),
+    "Calibri": ("calibri.ttf", "calibrib.ttf", "Calibri"),
+    "Georgia": ("georgia.ttf", "georgiab.ttf", "Georgia"),
+    "Times New Roman": ("times.ttf", "timesbd.ttf", "Times New Roman"),
+    "Consolas": ("consola.ttf", "consolab.ttf", "Consolas"),
+    "Courier New": ("cour.ttf", "courbd.ttf", "Courier New"),
+    "Impact": ("impact.ttf", "impact.ttf", "Impact"),
+    "Comic Sans MS": ("comic.ttf", "comicbd.ttf", "Comic Sans MS"),
+}
 DESK_WEEK = ("Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag")
 DESK_MONTH = ("Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August",
               "September", "Oktober", "November", "Dezember")
@@ -191,6 +209,7 @@ DEFAULTS = {
         "text": "",
         "pos": "Unten links",
         "color": "Weiß",
+        "font": "Segoe UI",
         "size": 72,
     },
 }
@@ -311,6 +330,7 @@ def load_config():
         "text": " ".join(str(raw_desk.get("text") or "").split())[:80],
         "pos": raw_desk.get("pos") if raw_desk.get("pos") in DESK_POS else base_desk["pos"],
         "color": raw_desk.get("color") if raw_desk.get("color") in DESK_COLORS else base_desk["color"],
+        "font": raw_desk.get("font") if raw_desk.get("font") in DESK_FONTS else base_desk["font"],
         "size": desk_size,
     }
     cfg["night_id"] = cfg.get("night_id") if isinstance(cfg.get("night_id"), str) else ""
@@ -582,9 +602,13 @@ def _trust_contexts():
     return contexts
 
 
-def _cloud_open(req, timeout):
+def _cloud_open(req, timeout, allow_unverified=False):
     """Anfrage an die Kontenliste – mit mehreren Versuchen, damit ein kaputter
-    Zertifikatsspeicher oder ein Proxy den Abruf nicht dauerhaft blockiert."""
+    Zertifikatsspeicher oder ein Proxy den Abruf nicht dauerhaft blockiert.
+
+    Ohne Zertifikatsprüfung darf nur eine Anfrage ohne Zugangsdaten laufen: sonst
+    könnte ein Angreifer im Netz den Administrator-Token mitlesen.
+    """
     errors = []
     for direct in (False, True):  # erst normal, dann am System-Proxy vorbei
         for label, ctx in _trust_contexts():
@@ -603,7 +627,8 @@ def _cloud_open(req, timeout):
                     break  # Netzwerkfehler – ein anderer Zertifikatsspeicher hilft nicht
     # Letzter Ausweg, nur für die eigene Konten-Adresse: Manche PCs können die Kette
     # dauerhaft nicht prüfen. Dann ohne Prüfung, aber nur wenn es wirklich daran lag.
-    if (any(is_cert_error(e) for _, e in errors)
+    if (allow_unverified and not req.has_header("Authorization")
+            and any(is_cert_error(e) for _, e in errors)
             and (urllib.parse.urlparse(req.full_url).hostname or "").lower() == CLOUD_HOST):
         cloud_log("Zertifikatsprüfung fehlgeschlagen – Abruf ohne Prüfung: "
                   + " | ".join(f"{label}: {e}" for label, e in errors))
@@ -628,7 +653,10 @@ def _cloud_json(path, payload=None, token="", timeout=10):
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(CLOUD_URL.rstrip("/") + path, data=data, headers=headers,
                                  method="POST" if data is not None else "GET")
-    return json.loads(_cloud_open(req, timeout).decode("utf-8") or "{}")
+    # Nur unkritische Anfragen (ohne Token und ohne Token im Body) dürfen im Notfall
+    # ohne Zertifikatsprüfung laufen – der Administrator-Token nie.
+    unverified = not token and data is None
+    return json.loads(_cloud_open(req, timeout, allow_unverified=unverified).decode("utf-8") or "{}")
 
 
 def report_account(name):
@@ -1130,14 +1158,57 @@ def fps_script():
 
 
 # ----------------------------------------------------------------------------- Eigener Desktop (Premium)
-def desk_font(size, bold=True):
-    for name in (("segoeuib.ttf" if bold else "segoeui.ttf"), ("arialbd.ttf" if bold else "arial.ttf"),
+def desk_font_dirs():
+    """Ordner mit den Windows-Schriften (System und pro Benutzer installierte)."""
+    dirs = []
+    windir = os.environ.get("WINDIR") or os.environ.get("SystemRoot") or r"C:\Windows"
+    dirs.append(Path(windir) / "Fonts")
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        dirs.append(Path(local) / "Microsoft" / "Windows" / "Fonts")
+    return dirs
+
+
+def desk_font(size, bold=True, family=None):
+    """Schriftdatei für Vorschau und Export: gewählte Schrift, danach sinnvolle Ersatzschriften.
+
+    Die Dateien werden auch direkt im Windows-Schriftordner gesucht – sonst findet Pillow
+    sie auf manchen PCs nicht und die Uhr würde in einer winzigen Ersatzschrift erscheinen.
+    """
+    regular, bold_file, _ = DESK_FONTS.get(family, DESK_FONTS[DEFAULTS["desk"]["font"]])
+    names = []
+    for name in (bold_file if bold else regular, regular,
+                 "arialbd.ttf" if bold else "arial.ttf", "segoeuib.ttf" if bold else "segoeui.ttf",
                  "DejaVuSans-Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"):
-        try:
-            return ImageFont.truetype(name, size)
-        except Exception:
+        if name not in names:
+            names.append(name)
+    for name in names:
+        paths = [name]
+        if not os.path.isabs(name):
+            paths += [str(d / name) for d in desk_font_dirs() if (d / name).exists()]
+        for path in paths:
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                continue
+    if hasattr(ImageFont, "load_default"):
+        try:  # Pillow >= 10.1: Ersatzschrift in der richtigen Größe statt mini
+            return ImageFont.load_default(size)
+        except TypeError:
             pass
     return ImageFont.load_default()
+
+
+def desk_utc_offset():
+    """Zeitzone des PCs in Sekunden – damit die Live-Uhr nie in UTC läuft."""
+    try:
+        return int(time.localtime().tm_gmtoff)
+    except (AttributeError, OSError, ValueError):
+        try:
+            local = time.localtime()
+            return -int(time.altzone if local.tm_isdst > 0 else time.timezone)
+        except Exception:
+            return 0
 
 
 def desk_fallback_background():
@@ -1246,8 +1317,7 @@ def render_desk_image(desk, size=(1920, 1080), when=None, still=None):
     x = m if align == "l" else (W - m if align == "r" else W // 2)
     color = DESK_COLOR_RGB.get(desk.get("color"), (255, 255, 255))
     for (text, fsize, bold), hh in zip(lines, heights):
-        font = desk_font(max(10, int(fsize * H / 1080)), bold)
-        d.text((x + 3, y + 4), text, font=font, fill=(0, 0, 0, 165), anchor=align + "t")
+        font = desk_font(max(10, int(fsize * H / 1080)), bold, desk.get("font"))
         d.text((x, y), text, font=font, fill=color + (255,), anchor=align + "t")
         y += hh
     return img.convert("RGB")
@@ -1261,16 +1331,47 @@ local function esc(s)
 end
 local WEEK = {"Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"}
 local MONTH = {"Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"}
+-- Datum und Uhrzeit aus der Epoche berechnen: os.date liefert je nach mpv-Build
+-- UTC oder Ortszeit. So gilt immer die Zeitzone des PCs (CFG.offset, in Sekunden).
+local function civil(days)
+    local z = days + 719468
+    local era = math.floor(z / 146097)
+    local doe = z - era * 146097
+    local yoe = math.floor((doe - math.floor(doe / 1460) + math.floor(doe / 36524)
+                            - math.floor(doe / 146096)) / 365)
+    local y = yoe + era * 400
+    local doy = doe - (365 * yoe + math.floor(yoe / 4) - math.floor(yoe / 100))
+    local mp = math.floor((5 * doy + 2) / 153)
+    local d = doy - math.floor((153 * mp + 2) / 5) + 1
+    local m = mp + ((mp < 10) and 3 or -9)
+    if m <= 2 then y = y + 1 end
+    return y, m, d
+end
+
+local function local_parts()
+    local ok, t = pcall(function()
+        local secs = os.time() + (CFG.offset or 0)
+        local days = math.floor(secs / 86400)
+        local sod = secs - days * 86400
+        local _, month, day = civil(days)
+        return {hour = math.floor(sod / 3600), min = math.floor((sod % 3600) / 60),
+                day = day, month = month, wday = ((days + 4) % 7) + 1, isdst = false}
+    end)
+    if ok and t then return t end
+    return os.date("*t")
+end
+
 local function draw()
-    local t = os.date("*t")
+    local t = local_parts()
+    local scale = CFG.h / 1080
     local lines = {}
     if CFG.clock then
-        -- os.date mit Tabellen-Argument ist in Lua ein Fehler -> Uhr aus den Feldern bauen
         lines[#lines + 1] = {string.format("%02d:%02d", t.hour, t.min), CFG.size, true}
     end
     local sub = math.max(13, math.floor(CFG.size * 0.36))
     if CFG.date then
-        lines[#lines + 1] = {string.format("%s, %d. %s", WEEK[t.wday], t.day, MONTH[t.month]), sub, false}
+        lines[#lines + 1] = {string.format("%s, %d. %s", WEEK[t.wday] or "", t.day, MONTH[t.month] or ""),
+                             sub, false}
     end
     if CFG.text ~= "" then
         lines[#lines + 1] = {esc(CFG.text), sub, false}
@@ -1281,7 +1382,7 @@ local function draw()
     end
     local hs, total = {}, 0
     for i = 1, #lines do
-        hs[i] = math.floor(lines[i][2] * 1.3)
+        hs[i] = math.floor(lines[i][2] * scale * 1.3)
         total = total + hs[i]
     end
     local m = math.max(24, math.floor(math.min(CFG.w, CFG.h) * 0.06))
@@ -1307,9 +1408,11 @@ local function draw()
         end
         -- ass-events erwartet nur den ASS-Text (eine Zeile = ein Event),
         -- KEIN "Dialogue: ..."-Präfix - das würde als Text angezeigt.
+        -- Sauberer Text: kein schwarzer Rand, kein Schatten, dafür die gewählte Schrift.
         events[#events + 1] = string.format(
-            "{\\an%d\\pos(%d,%d)\\fs%d\\c&H%s&\\3c&H000000&\\bord3\\shad0\\b%d\\fnSegoe UI}%s",
-            an, x, y, lines[i][2], CFG.color, lines[i][3] and 1 or 0, lines[i][1])
+            "{\\an%d\\pos(%d,%d)\\fs%d\\c&H%s&\\bord0\\shad0\\b%d\\fn%s}%s",
+            an, x, y, math.floor(lines[i][2] * scale), CFG.color, lines[i][3] and 1 or 0,
+            CFG.font, lines[i][1])
     end
     mp.command_native({name = "osd-overlay", id = OVL, format = "ass-events",
                        data = table.concat(events, "\n"), res_x = CFG.w, res_y = CFG.h})
@@ -1352,6 +1455,8 @@ def desk_lua_source(desk, w, h):
         "text": " ".join(str(desk.get("text") or "").split())[:80],
         "pos": DESK_POS.get(desk.get("pos"), "bl"),
         "color": DESK_COLORS.get(desk.get("color"), "FFFFFF"),
+        "font": DESK_FONTS.get(desk.get("font"), DESK_FONTS[DEFAULTS["desk"]["font"]])[2],
+        "offset": desk_utc_offset(),
         "size": int(desk.get("size", 72) or 72),
         "w": int(w),
         "h": int(h),
@@ -3619,6 +3724,11 @@ class App(ctk.CTk):
             self._desk_cfg()["color"] = label
             self._desk_changed()
 
+    def _desk_font_choice(self, label):
+        if label in DESK_FONTS:
+            self._desk_cfg()["font"] = label
+            self._desk_changed()
+
     def _desk_size(self, value):
         size = max(32, min(140, int(float(value))))
         self._desk_cfg()["size"] = size
@@ -3790,6 +3900,11 @@ class App(ctk.CTk):
                                                  width=210, **self._menu_style())
         self.desk_color_menu.set(desk.get("color", "Weiß"))
         self.desk_color_menu.grid(row=0, column=1, sticky="e", padx=(16, 0))
+        row = self._row(ov, "Schriftart", "Gilt für Uhr, Datum und Text – Auswahl aus vielen Windows-Schriften.")
+        self.desk_font_menu = ctk.CTkOptionMenu(row, values=list(DESK_FONTS), command=self._desk_font_choice,
+                                                width=210, **self._menu_style())
+        self.desk_font_menu.set(desk.get("font", "Segoe UI"))
+        self.desk_font_menu.grid(row=0, column=1, sticky="e", padx=(16, 0))
         row = self._row(ov, "Schriftgröße", "Größe der Uhr in Pixel (für 1080p).")
         srow = ctk.CTkFrame(row, fg_color="transparent")
         srow.grid(row=0, column=1, sticky="e", padx=(16, 0))

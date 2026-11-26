@@ -3,10 +3,13 @@ package de.wallura.app;
 import android.content.Context;
 import android.graphics.Typeface;
 import android.view.Gravity;
+import android.view.View;
+import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-/** Kleine Fabriken für die im PC-Design gehaltenen Bausteine. */
+/** Kleine Fabriken für die Bausteine der Handy-Oberfläche. */
 final class Ui {
 
     static final int PRIMARY = 0;
@@ -38,7 +41,7 @@ final class Ui {
         return t;
     }
 
-    /** Button im Stil der PC-Buttons (primaer, secondary, danger, ghost, chips). */
+    /** Knopf im Stil der App (primär, secondary, danger, ghost, chips). */
     static TextView pill(Context c, String label, int kind) {
         int colorRes;
         int background;
@@ -69,31 +72,32 @@ final class Ui {
                 break;
         }
         boolean chip = kind == CHIP_ON || kind == CHIP_OFF;
-        TextView t = text(c, label, chip ? 10 : 11, col(c, colorRes), kind == PRIMARY);
+        TextView t = text(c, label, chip ? 12 : 13, col(c, colorRes), kind == PRIMARY);
         t.setGravity(Gravity.CENTER);
         t.setBackgroundResource(background);
-        int padH = dp(c, 10);
-        int padV = dp(c, 8);
-        t.setPadding(padH, padV, padH, padV);
+        t.setPadding(dp(c, chip ? 14 : 16), dp(c, chip ? 9 : 10),
+                dp(c, chip ? 14 : 16), dp(c, chip ? 9 : 10));
+        t.setMinHeight(dp(c, chip ? 36 : 44));
+        t.setMinWidth(0);
         t.setClickable(true);
         t.setFocusable(true);
         return t;
     }
 
-    /** Sektion wie am PC: Titel + Karte. Die Karte nimmt die Zeilen auf. */
+    /** Abschnitt: Überschrift und Karte, die die Zeilen aufnimmt. */
     static LinearLayout section(Context c, LinearLayout parent, String title) {
-        TextView headline = text(c, title, 13, col(c, R.color.text), true);
+        TextView headline = text(c, title, 14, col(c, R.color.text), true);
         LinearLayout.LayoutParams headlineParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        headlineParams.topMargin = dp(c, 10);
-        headlineParams.bottomMargin = dp(c, 6);
+        headlineParams.topMargin = dp(c, 18);
+        headlineParams.bottomMargin = dp(c, 8);
         parent.addView(headline, headlineParams);
 
         LinearLayout card = new LinearLayout(c);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setBackgroundResource(R.drawable.bg_card);
-        int pad = dp(c, 10);
-        card.setPadding(pad + dp(c, 2), pad, pad + dp(c, 2), pad);
+        int pad = dp(c, 14);
+        card.setPadding(pad, pad, pad, dp(c, 4));
         LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         cardParams.bottomMargin = dp(c, 10);
@@ -101,32 +105,70 @@ final class Ui {
         return card;
     }
 
-    /** Zeile wie am PC: Titel + Beschreibung links, Platz für ein Steuerelement rechts. */
+    /**
+     * Zeile in einer Karte: Titel und Beschreibung übereinander, die Steuerelemente
+     * kommen darunter in {@link #controls}. So bleibt auf dem Handy alles lesbar.
+     */
     static LinearLayout block(Context c, LinearLayout card, String title, String desc) {
-        LinearLayout row = new LinearLayout(c);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout box = new LinearLayout(c);
+        box.setOrientation(LinearLayout.VERTICAL);
 
-        LinearLayout texts = new LinearLayout(c);
-        texts.setOrientation(LinearLayout.VERTICAL);
-        texts.setLayoutParams(new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-        texts.addView(text(c, title, 11, col(c, R.color.text), false));
+        box.addView(text(c, title, 14, col(c, R.color.text), false));
 
         TextView descView = null;
         if (desc != null && !desc.isEmpty()) {
-            descView = text(c, desc, 9, col(c, R.color.muted), false);
-            descView.setLineSpacing(0f, 1.1f);
-            texts.addView(descView);
+            descView = text(c, desc, 11, col(c, R.color.muted), false);
+            descView.setLineSpacing(dp(c, 1), 1.15f);
+            LinearLayout.LayoutParams descParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            descParams.topMargin = dp(c, 3);
+            box.addView(descView, descParams);
         }
-        row.addView(texts);
-        row.setTag(descView);
+        box.setTag(descView);
 
-        LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams boxParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        rowParams.topMargin = dp(c, 6);
-        rowParams.bottomMargin = dp(c, 6);
-        card.addView(row, rowParams);
+        boxParams.topMargin = dp(c, 8);
+        boxParams.bottomMargin = dp(c, 8);
+        card.addView(box, boxParams);
+        return box;
+    }
+
+    /** Eigene Zeile unter Titel/Beschreibung, in die die Steuerelemente kommen. */
+    static LinearLayout controls(Context c, LinearLayout block) {
+        LinearLayout row = new LinearLayout(c);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        params.topMargin = dp(c, 10);
+        block.addView(row, params);
         return row;
+    }
+
+    /**
+     * Chip-Reihe, die auf schmalen Handys seitlich scrollt, statt gequetscht zu werden.
+     * Die Reihe hängt danach schon in der Karte.
+     */
+    static LinearLayout chipScroll(Context c, LinearLayout card) {
+        LinearLayout row = new LinearLayout(c);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        HorizontalScrollView scroll = new HorizontalScrollView(c);
+        scroll.setHorizontalScrollBarEnabled(false);
+        scroll.addView(row, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        params.bottomMargin = dp(c, 6);
+        card.addView(scroll, params);
+        return row;
+    }
+
+    /** Volle Breite für ein einzelnes Steuerelement in {@link #controls}. */
+    static void wide(LinearLayout row, View view) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        row.addView(view, params);
     }
 }

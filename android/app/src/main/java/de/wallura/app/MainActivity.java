@@ -14,6 +14,7 @@ import android.text.TextWatcher;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.widget.EditText;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
@@ -44,7 +45,7 @@ public class MainActivity extends Activity {
     private LinearLayout settings;
     private LinearLayout filterRow;
     private LinearLayout sortRow;
-    private TextView sideActive;
+    private TextView activeName;
     private SeekBar volume;
     private TextView volumeLabel;
     private TextView navLibrary;
@@ -73,7 +74,7 @@ public class MainActivity extends Activity {
         sortRow = findViewById(R.id.lib_sort);
         favoritesOnly = Library.favoritesOnly(this);
         settings = findViewById(R.id.settings_container);
-        sideActive = findViewById(R.id.side_active);
+        activeName = findViewById(R.id.active_name);
         volume = findViewById(R.id.volume);
         volumeLabel = findViewById(R.id.volume_lbl);
         navLibrary = findViewById(R.id.nav_library);
@@ -82,11 +83,11 @@ public class MainActivity extends Activity {
         pageLibrary = findViewById(R.id.page_library);
         pageSettings = findViewById(R.id.page_settings);
 
-        ((TextView) findViewById(R.id.side_version)).setText("Version " + version);
+        ((TextView) findViewById(R.id.header_version)).setText("Version " + version);
 
         navLibrary.setOnClickListener(v -> showPage("library"));
         navSettings.setOnClickListener(v -> showPage("settings"));
-        findViewById(R.id.side_set).setOnClickListener(v -> setAsWallpaper());
+        findViewById(R.id.btn_set).setOnClickListener(v -> setAsWallpaper());
         findViewById(R.id.btn_add).setOnClickListener(v -> pickVideo());
         findViewById(R.id.btn_next).setOnClickListener(v -> nextWallpaper());
         findViewById(R.id.btn_stop).setOnClickListener(v -> {
@@ -163,7 +164,7 @@ public class MainActivity extends Activity {
 
         File active = Library.activeFile(this);
         String activePath = active == null ? null : active.getAbsolutePath();
-        sideActive.setText(active == null ? "Keins gewählt" : active.getName());
+        activeName.setText(active == null ? "Keins gewählt" : Library.displayName(this, active));
 
         updateStorageText();
 
@@ -264,19 +265,19 @@ public class MainActivity extends Activity {
         favParams.leftMargin = Ui.dp(this, 5);
         filterRow.addView(favs, favParams);
 
-        View spacer = new View(this);
-        filterRow.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1f));
-
         TextView randomFav = Ui.pill(this, "★🎲", Ui.SECONDARY);
         randomFav.setOnClickListener(v -> randomFavorite());
         LinearLayout.LayoutParams randomFavParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        randomFavParams.rightMargin = Ui.dp(this, 5);
+        randomFavParams.leftMargin = Ui.dp(this, 10);
         filterRow.addView(randomFav, randomFavParams);
 
         TextView shuffle = Ui.pill(this, "🎲 Zufällig", Ui.SECONDARY);
         shuffle.setOnClickListener(v -> randomWallpaper());
-        filterRow.addView(shuffle);
+        LinearLayout.LayoutParams shuffleParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        shuffleParams.leftMargin = Ui.dp(this, 6);
+        filterRow.addView(shuffle, shuffleParams);
     }
 
     /** Sortier-Chips über der Liste (Neu / A–Z / Meistgesehen / Favoriten zuerst). */
@@ -294,9 +295,9 @@ public class MainActivity extends Activity {
                 refresh();
             });
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
             if (i > 0) {
-                params.leftMargin = Ui.dp(this, 4);
+                params.leftMargin = Ui.dp(this, 6);
             }
             sortRow.addView(chip, params);
         }
@@ -509,8 +510,7 @@ public class MainActivity extends Activity {
         LinearLayout play = Ui.section(this, settings, "Wiedergabe");
         Ui.block(this, play, "Anpassung",
                 "Füllen schneidet zu, Einpassen zeigt Balken, Strecken verzerrt.");
-        LinearLayout chips = new LinearLayout(this);
-        chips.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout chips = Ui.chipScroll(this, play);
         String[] labels = {"Füllen", "Einpassen", "Strecken"};
         String[] values = {Library.FIT_COVER, Library.FIT_CONTAIN, Library.FIT_STRETCH};
         String current = Library.fit(this);
@@ -525,21 +525,16 @@ public class MainActivity extends Activity {
                 setStatus("Anpassung: " + value);
             });
             LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(
-                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
             if (i > 0) {
-                chipParams.leftMargin = Ui.dp(this, 5);
+                chipParams.leftMargin = Ui.dp(this, 6);
             }
             chips.addView(chip, chipParams);
         }
-        LinearLayout.LayoutParams chipsParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        chipsParams.bottomMargin = Ui.dp(this, 6);
-        play.addView(chips, chipsParams);
 
         Ui.block(this, play, "Automatisch wechseln",
                 "Wechselt das Wallpaper in festem Abstand – auch auf dem Homescreen.");
-        LinearLayout rotChips = new LinearLayout(this);
-        rotChips.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout rotChips = Ui.chipScroll(this, play);
         int[] minutes = {0, 5, 15, 30, 60};
         String[] rotLabels = {"Aus", "5 Min", "15 Min", "30 Min", "1 Std"};
         int currentRotate = Library.rotateMinutes(this);
@@ -555,20 +550,15 @@ public class MainActivity extends Activity {
                         : "Automatischer Wechsel alle " + value + " Minuten.");
             });
             LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(
-                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
             if (i > 0) {
-                chipParams.leftMargin = Ui.dp(this, 5);
+                chipParams.leftMargin = Ui.dp(this, 6);
             }
             rotChips.addView(chip, chipParams);
         }
-        LinearLayout.LayoutParams rotParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        rotParams.bottomMargin = Ui.dp(this, 6);
-        play.addView(rotChips, rotParams);
 
         Ui.block(this, play, "Geschwindigkeit", "Wiedergabe schneller oder langsamer.");
-        LinearLayout speedRow = new LinearLayout(this);
-        speedRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout speedRow = Ui.chipScroll(this, play);
         float[] speeds = {1f, 1.25f, 1.5f, 2f};
         String[] speedLabels = {"1×", "1,25×", "1,5×", "2×"};
         for (int i = 0; i < speeds.length; i++) {
@@ -582,16 +572,12 @@ public class MainActivity extends Activity {
                 setStatus("Geschwindigkeit: " + value + "×");
             });
             LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(
-                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
             if (i > 0) {
-                chipParams.leftMargin = Ui.dp(this, 5);
+                chipParams.leftMargin = Ui.dp(this, 6);
             }
             speedRow.addView(chip, chipParams);
         }
-        LinearLayout.LayoutParams speedParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        speedParams.bottomMargin = Ui.dp(this, 6);
-        play.addView(speedRow, speedParams);
 
         Ui.block(this, play, "Lautstärke", "Ton des Wallpapers – 0 % ist stumm (unten in der Leiste).");
 
@@ -600,55 +586,44 @@ public class MainActivity extends Activity {
                 "Wallura als Live-Wallpaper im System einrichten.");
         TextView set = Ui.pill(this, "Setzen", Ui.PRIMARY);
         set.setOnClickListener(v -> setAsWallpaper());
-        wallRow.addView(set);
+        Ui.wide(Ui.controls(this, wallRow), set);
 
         LinearLayout updates = Ui.section(this, settings, "Updates");
         LinearLayout updateRow = Ui.block(this, updates, "Wallura " + version,
                 "Sucht bei GitHub nach einer neuen Version.");
         TextView check = Ui.pill(this, "Nach Updates suchen", Ui.SECONDARY);
         check.setOnClickListener(v -> checkUpdates());
-        updateRow.addView(check);
+        Ui.controls(this, updateRow).addView(check);
 
         LinearLayout storage = Ui.section(this, settings, "Speicher");
         LinearLayout storageRow = Ui.block(this, storage, "Videos", "…");
         storageDesc = (TextView) storageRow.getTag();
         TextView clear = Ui.pill(this, "Alle löschen", Ui.DANGER);
         clear.setOnClickListener(v -> confirmDeleteAll());
-        storageRow.addView(clear);
+        Ui.wide(Ui.controls(this, storageRow), clear);
 
         LinearLayout change = Ui.section(this, settings, "Wechsel");
-        LinearLayout changeRow = new LinearLayout(this);
-        changeRow.setOrientation(LinearLayout.HORIZONTAL);
+        Ui.block(this, change, "Ruhezeiten und Reihenfolge",
+                "Nachts pausieren, nur Favoriten wechseln oder zufällig mischen.");
+        LinearLayout changeRow = Ui.chipScroll(this, change);
         toggleChip(changeRow, "Nur Favoriten", Library.favPlaylist(this),
                 () -> Library.setFavPlaylist(this, !Library.favPlaylist(this)));
         toggleChip(changeRow, "Ruhezeiten 22–7", Library.quietHours(this),
                 () -> Library.setQuietHours(this, !Library.quietHours(this)));
-        change.addView(changeRow, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-        LinearLayout changeRow2 = new LinearLayout(this);
-        changeRow2.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout changeRow2 = Ui.chipScroll(this, change);
         toggleChip(changeRow2, "Zufällige Reihenfolge", Library.shuffle(this),
                 () -> Library.setShuffle(this, !Library.shuffle(this)));
         toggleChip(changeRow2, "Hinweis", Library.notifyRotate(this),
                 () -> Library.setNotifyRotate(this, !Library.notifyRotate(this)));
-        LinearLayout.LayoutParams changeParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        changeParams.topMargin = Ui.dp(this, 4);
-        change.addView(changeRow2, changeParams);
-        Ui.block(this, change, "Ruhezeiten und Reihenfolge",
-                "Nachts pausieren, nur Favoriten wechseln oder zufällig mischen.");
 
         LinearLayout power = Ui.section(this, settings, "Akku & Start");
-        LinearLayout powerRow = new LinearLayout(this);
-        powerRow.setOrientation(LinearLayout.HORIZONTAL);
+        Ui.block(this, power, "Energiesparmodus",
+                "Pausiert das Wallpaper, sobald Android Strom spart.");
+        LinearLayout powerRow = Ui.chipScroll(this, power);
         toggleChip(powerRow, "Bei Energiesparen pausieren", Library.pauseBattery(this),
                 () -> Library.setPauseBattery(this, !Library.pauseBattery(this)));
         toggleChip(powerRow, "Zufällig beim Start", Library.randomStart(this),
                 () -> Library.setRandomStart(this, !Library.randomStart(this)));
-        power.addView(powerRow, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
-        Ui.block(this, power, "Energiesparmodus",
-                "Pausiert das Wallpaper, sobald Android Strom spart.");
 
         LinearLayout libBox = Ui.section(this, settings, "Bibliothek");
         LinearLayout statsRow = Ui.block(this, libBox, "Statistik", statsText());
@@ -659,7 +634,7 @@ public class MainActivity extends Activity {
             refresh();
             setStatus("Wiedergabe-Statistik zurückgesetzt.");
         });
-        statsRow.addView(reset);
+        Ui.controls(this, statsRow).addView(reset);
         LinearLayout cleanRow = Ui.block(this, libBox, "Aufräumen",
                 "Doppelte Videos, Favoriten und Vorschaubilder.");
         LinearLayout cleanBtns = new LinearLayout(this);
@@ -695,12 +670,15 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
         thumbsGap.leftMargin = Ui.dp(this, 5);
         cleanBtns.addView(thumbsBtn, thumbsGap);
-        cleanRow.addView(cleanBtns);
+        HorizontalScrollView cleanScroll = new HorizontalScrollView(this);
+        cleanScroll.setHorizontalScrollBarEnabled(false);
+        cleanScroll.addView(cleanBtns);
+        Ui.controls(this, cleanRow).addView(cleanScroll);
         LinearLayout exportRow = Ui.block(this, libBox, "Export",
                 "Bibliotheksliste als JSON sichern (ohne Videodateien).");
         TextView export = Ui.pill(this, "Exportieren", Ui.SECONDARY);
         export.setOnClickListener(v -> exportLibrary());
-        exportRow.addView(export);
+        Ui.wide(Ui.controls(this, exportRow), export);
 
         LinearLayout night = Ui.section(this, settings, "Tag/Nacht");
         LinearLayout nightRow = Ui.block(this, night, "Nacht-Wallpaper",
@@ -708,7 +686,8 @@ public class MainActivity extends Activity {
         TextView chooseNight = Ui.pill(this, Library.nightVideo(this) == null ? "Wählen" : "Ändern",
                 Ui.SECONDARY);
         chooseNight.setOnClickListener(v -> pickNight());
-        nightRow.addView(chooseNight);
+        LinearLayout nightActs = Ui.controls(this, nightRow);
+        nightActs.addView(chooseNight);
         if (Library.nightVideo(this) != null) {
             TextView removeNight = Ui.pill(this, "Entfernen", Ui.GHOST);
             removeNight.setOnClickListener(v -> {
@@ -719,8 +698,8 @@ public class MainActivity extends Activity {
             });
             LinearLayout.LayoutParams removeParams = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-            removeParams.leftMargin = Ui.dp(this, 5);
-            nightRow.addView(removeNight, removeParams);
+            removeParams.leftMargin = Ui.dp(this, 6);
+            nightActs.addView(removeNight, removeParams);
         }
 
         LinearLayout lock = Ui.section(this, settings, "Sperrbildschirm");
@@ -728,7 +707,7 @@ public class MainActivity extends Activity {
                 "Aktuelles Video als Bild auf dem Sperrbildschirm.");
         TextView lockBtn = Ui.pill(this, "Setzen", Ui.PRIMARY);
         lockBtn.setOnClickListener(v -> setLockscreen());
-        lockRow.addView(lockBtn);
+        Ui.wide(Ui.controls(this, lockRow), lockBtn);
 
         LinearLayout about = Ui.section(this, settings, "Über");
         Ui.block(this, about, "Wallura " + version,
@@ -804,8 +783,8 @@ public class MainActivity extends Activity {
             refresh();
         });
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
-        params.leftMargin = Ui.dp(this, 4);
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        params.leftMargin = Ui.dp(this, 6);
         row.addView(chip, params);
     }
 
