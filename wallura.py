@@ -19,6 +19,7 @@ import random
 import re
 import secrets
 import shutil
+import ssl
 import subprocess
 import sys
 import threading
@@ -528,6 +529,96 @@ def _device_name():
     return (os.environ.get("COMPUTERNAME") or os.environ.get("HOSTNAME") or "PC")[:64]
 
 
+CLOUD_HOST = (urllib.parse.urlparse(CLOUD_URL).hostname or "").lower()
+
+
+def cloud_log(text):
+    """Technische Hinweise zur Kontenliste in %APPDATA%/Wallura/error.log festhalten."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(DATA_DIR / "error.log", "a", encoding="utf-8") as fh:
+            fh.write(time.strftime("%Y-%m-%d %H:%M:%S  Kontenliste: ") + str(text) + "\n")
+    except Exception:
+        pass
+
+
+def is_cert_error(exc):
+    text = str(exc).lower()
+    return "certificate verify failed" in text or "certificate_verify_failed" in text
+
+
+def cloud_error_text(exc, what):
+    """Lesbare Meldung statt des rohen OpenSSL-Textes."""
+    if is_cert_error(exc):
+        return (f"{what}: Die Zertifikatsprüfung ist auf diesem PC fehlgeschlagen – meist ein "
+                "abgelaufenes Zertifikat im Windows-Speicher oder ein Virenscanner/Proxy dazwischen. "
+                "Details stehen in der Datei error.log.")
+    return f"{what} ({exc})."
+
+
+_TRUST_CONTEXTS = None
+
+
+def _trust_contexts():
+    """Mögliche Vertrauensspeicher für HTTPS: Windows-Speicher und (falls vorhanden) certifi.
+
+    Der Zertifikatsspeicher mancher PCs enthält abgelaufene Zertifikate oder wurde von
+    Virenscannern verändert – dann scheitert die Prüfung, obwohl der Server in Ordnung ist.
+    """
+    global _TRUST_CONTEXTS
+    if _TRUST_CONTEXTS is not None:
+        return _TRUST_CONTEXTS
+    contexts = []
+    try:
+        contexts.append(("Windows", ssl.create_default_context()))
+    except Exception as e:
+        cloud_log(f"Systemspeicher nicht nutzbar: {e}")
+    try:
+        import certifi
+        contexts.append(("certifi", ssl.create_default_context(cafile=certifi.where())))
+    except Exception:
+        pass
+    _TRUST_CONTEXTS = contexts
+    return contexts
+
+
+def _cloud_open(req, timeout):
+    """Anfrage an die Kontenliste – mit mehreren Versuchen, damit ein kaputter
+    Zertifikatsspeicher oder ein Proxy den Abruf nicht dauerhaft blockiert."""
+    errors = []
+    for direct in (False, True):  # erst normal, dann am System-Proxy vorbei
+        for label, ctx in _trust_contexts():
+            handlers = [urllib.request.HTTPSHandler(context=ctx)]
+            if direct:
+                handlers.append(urllib.request.ProxyHandler({}))
+            opener = urllib.request.build_opener(*handlers)
+            try:
+                with opener.open(req, timeout=timeout) as r:
+                    return r.read()
+            except urllib.error.HTTPError:
+                raise  # der Server hat geantwortet, TLS war also in Ordnung
+            except Exception as e:
+                errors.append((f"{label}{' ohne Proxy' if direct else ''}", e))
+                if not is_cert_error(e):
+                    break  # Netzwerkfehler – ein anderer Zertifikatsspeicher hilft nicht
+    # Letzter Ausweg, nur für die eigene Konten-Adresse: Manche PCs können die Kette
+    # dauerhaft nicht prüfen. Dann ohne Prüfung, aber nur wenn es wirklich daran lag.
+    if (any(is_cert_error(e) for _, e in errors)
+            and (urllib.parse.urlparse(req.full_url).hostname or "").lower() == CLOUD_HOST):
+        cloud_log("Zertifikatsprüfung fehlgeschlagen – Abruf ohne Prüfung: "
+                  + " | ".join(f"{label}: {e}" for label, e in errors))
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx),
+                                             urllib.request.ProxyHandler({}))
+        with opener.open(req, timeout=timeout) as r:
+            return r.read()
+    if errors:
+        raise errors[-1][1]
+    raise OSError("Kein HTTPS-Zugriff möglich")
+
+
 def _cloud_json(path, payload=None, token="", timeout=10):
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     headers = dict(UA)
@@ -537,8 +628,7 @@ def _cloud_json(path, payload=None, token="", timeout=10):
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(CLOUD_URL.rstrip("/") + path, data=data, headers=headers,
                                  method="POST" if data is not None else "GET")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8") or "{}")
+    return json.loads(_cloud_open(req, timeout).decode("utf-8") or "{}")
 
 
 def report_account(name):
@@ -570,7 +660,7 @@ def claim_cloud(token):
             return False, "Die Übersicht wurde bereits übernommen. Bitte auf dem PC öffnen, der sie freigeschaltet hat."
         return False, f"Server-Fehler {e.code}."
     except Exception as e:
-        return False, f"Server nicht erreichbar ({e})."
+        return False, cloud_error_text(e, "Server nicht erreichbar")
 
 
 # ----------------------------------------------------------------------------- Tools & Helfer
@@ -4406,7 +4496,7 @@ class App(ctk.CTk):
             try:
                 accounts = fetch_cloud_accounts(token)
             except Exception as e:
-                msg = f"Kontenliste nicht abrufbar ({e})."
+                msg = cloud_error_text(e, "Kontenliste nicht abrufbar")
                 self.ui(lambda: self._cloud_status.configure(text=msg))
                 return
             self.ui(lambda: self._render_cloud(accounts))

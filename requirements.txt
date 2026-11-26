@@ -2,3 +2,4 @@ customtkinter
 pystray
 pywin32
 Pillow
+certifi
