@@ -47,7 +47,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageTk
 # ----------------------------------------------------------------------------- Pfade
 APP_NAME = "Wallura"
 COPYRIGHT = "© 2026 MorreTv. Open Source (MIT)"
-APP_VERSION = "1.9.0"   # wird vom Build / GitHub-Workflow aus dem Release-Tag gesetzt
+APP_VERSION = "2.2.0"   # wird vom Build / GitHub-Workflow aus dem Release-Tag gesetzt
 # GitHub-Repo für automatische Updates ("benutzername/repo"). Dort muss pro Version ein Release
 # mit der Datei Wallura-Setup.exe liegen (Repo bzw. Releases müssen öffentlich sein).
 GITHUB_REPO = "MorreTv/Wallura"
